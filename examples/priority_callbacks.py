@@ -3,6 +3,8 @@ from franzmq.client import Client
 from franzmq.topic import Topic
 from franzmq.payload import Metric
 
+# EXAMPLE: Two callbacks with different priorities
+
 client = Client.autocreate_and_connect(client_id="demo-subscriber")
 client.loop_start()
 

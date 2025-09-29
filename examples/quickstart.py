@@ -3,6 +3,8 @@ from franzmq.client import Client
 from franzmq.topic import Topic
 from franzmq.payload import Metric
 
+# EXAMPLE: Short example of a typed payload (Metric)
+
 # Create a client from .env file (MQTT_IP, MQTT_USERNAME, etc. are read by decouple)
 client = Client.autocreate_and_connect(client_id="quick-demo")
 client.loop_start()  # spin paho network loop in background
