@@ -13,7 +13,7 @@ def on_metric(client, ud, msg):
     print("Metric@", str(msg.topic), "=", msg.payload.value)
 
 client.on_message = on_metric
-client.subscribe(Topic(payload_type=Metric, context=("#",)))  # alp/v1/_Metric/#
+client.subscribe(Topic(payload_type=Metric, context=("#",)))  # example/v1/_Metric/#
 
 # publish a couple for demo
 client.publish(Topic(payload_type=Metric, context=("line-1","motor-7","speed")), Metric(123.4))

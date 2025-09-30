@@ -19,9 +19,9 @@ Wildcard = Literal['+', '#']
 
 @dataclass(frozen=True)
 class Topic:
-    """Basic topic class for alpamayo mqtt. Used for internal communication within an edge node."""
+    """Basic topic class. Used for internal communication within an edge node."""
     payload_type: Union[type[Payload], Wildcard] = None
-    prefix: str = "alp"
+    prefix: str = "example"
     version: str = "v1"
     context: Tuple[Union[str, Wildcard], ...] = ()
 
@@ -102,7 +102,7 @@ class Topic:
 
 @dataclass(frozen=True)
 class Isa95Topic(Topic):
-    """ISA95 topic class for alpamayo mqtt. Used for external ISA95-compliant communication."""
+    """ISA95 topic class. Used for external ISA95-compliant communication."""
     enterprise: Union[str, Wildcard] = None
     version: str = "v1-isa95"
     site: Optional[Union[str, Wildcard]] = None
@@ -197,7 +197,7 @@ class Isa95Topic(Topic):
 if __name__ == "__main__":
     from franzmq.payload import Metric
     # Create a basic Topic
-    basic_topic = Topic(prefix="alp", version="v1", payload_type=Metric, context=("sensor", "temperature"))
+    basic_topic = Topic(prefix="example", version="v1", payload_type=Metric, context=("sensor", "temperature"))
     print("Basic Topic:", basic_topic)
 
     # Convert the basic Topic to an Isa95Topic

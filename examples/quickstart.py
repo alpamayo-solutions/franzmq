@@ -9,7 +9,7 @@ from franzmq.payload import Metric
 client = Client.autocreate_and_connect(client_id="quick-demo")
 client.loop_start()  # spin paho network loop in background
 
-# Build a Topic that carries a 'Metric' payload, e.g., alp/v1/_Metric/sensor/temp
+# Build a Topic that carries a 'Metric' payload, e.g., example/v1/_Metric/sensor/temp
 topic = Topic(payload_type=Metric, context=("sensor", "temp"))
 
 # Receive any franz Message (typed) through a *global* on_message
