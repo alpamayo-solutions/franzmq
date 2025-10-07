@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "franzmq"
+version = "0.2.1"
+description = "Typed MQTT client and topic/payload model for ISA-95-ish messaging."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Alpamayo", email = "info@alpamayo-solutions.com" }]
+dependencies = [
+  "paho-mqtt>=2.0",        
+  "python-decouple>=3.8",  
+]
+
+# These show up on PyPI
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Internet",
+  "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/alpamayo-solutions/franzmq"
+Issues = "https://github.com/alpamayo-solutions/franzmq/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.1",
+  "twine>=5.0.0",
+  "pytest>=8.0",
+  "ruff>=0.5.0",
+  "black>=24.0",
+  "mypy>=1.10",
+]
