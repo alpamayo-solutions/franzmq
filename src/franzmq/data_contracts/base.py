@@ -1,6 +1,6 @@
 from abc import ABC
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 import sys
 import inspect
 from dataclasses import dataclass, field
@@ -8,10 +8,11 @@ from enum import Enum
 import datetime
 import time
 import logging
+from ..utils import StrEnum, CustomEncoder
 
-class StrEnum(str, Enum):
-    def __str__(self):
-        return self.value
+# class StrEnum(str, Enum):
+    # def __str__(self):
+        # return self.value
 
 class ServiceType(StrEnum):
     CONNECTOR = "connector"
@@ -50,18 +51,18 @@ class DataType(StrEnum):
     DATETIME_ARRAY = "datetime_array"
 
 
-class CustomEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, ServiceType):
-            return str(obj)
-        if isinstance(obj, datetime.datetime):
-            return obj.isoformat()
-        if isinstance(obj, IndexType):
-            return str(obj)
-        if isinstance(obj, DataType):
-            return str(obj)
+# class CustomEncoder(json.JSONEncoder):
+    # def default(self, obj):
+        # if isinstance(obj, ServiceType):
+            # return str(obj)
+        # if isinstance(obj, datetime.datetime):
+            # return obj.isoformat()
+        # if isinstance(obj, IndexType):
+            # return str(obj)
+        # if isinstance(obj, DataType):
+            # return str(obj)
         
-        return super().default(obj)
+        # return super().default(obj)
 
 @dataclass
 class Payload(ABC):
@@ -78,6 +79,27 @@ class Payload(ABC):
     @classmethod
     def get_identifier(cls) -> str:
         return "_" + cls.__name__
+
+@dataclass
+class ServiceDetails(Payload):
+    name: str
+    service_type: ServiceType
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    hierarchy: List[str] = field(default_factory=list)
+
+    # @classmethod
+    # def decode(cls, json_str, timestamp: int):
+    #     data = json.loads(json_str)
+    #     data.pop("version", None)
+    #     if "name" not in data and "id" in data:
+    #         data["name"] = data.pop("id")
+    #     return cls(**data)
+
+    # @property
+    # def __dict__(self):
+    #     d = super().__dict__.copy()
+    #     d["id"] = self.name
+    #     return d
 
 
 @dataclass

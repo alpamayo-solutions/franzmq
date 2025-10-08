@@ -1,7 +1,7 @@
 import time
 from franzmq.client import Client
 from franzmq.topic import Topic
-from franzmq.payload import Metric
+from franzmq.data_contracts.base import Metric
 
 # EXAMPLE: Short example of a typed payload (Metric)
 

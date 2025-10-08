@@ -1,5 +1,6 @@
-from franzmq.topic import Topic, Isa95Topic, Isa95Fields
-from franzmq.payload import Metric
+from franzmq import Topic
+from franzmq.topic import Isa95Topic, Isa95Fields
+from franzmq.data_contracts.base import Metric
 
 # EXAMPLE: Model plant hierarchy in the topic path, then convert to plain topics for internal consumers
 

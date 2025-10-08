@@ -2,12 +2,12 @@ import logging
 import threading
 from decouple import config
 import pathlib
-
-from paho.mqtt.client import Client as PahoClient
-from franzmq.data_contracts.base.topic import Topic
-from franzmq.data_contracts.base.payload import Payload, ServiceType
-from franzmq.data_contracts.base.message import Message
 from typing import Callable
+from paho.mqtt.client import Client as PahoClient
+
+from franzmq.topic import Topic
+from franzmq.message import Message
+from franzmq.data_contracts.base import Payload, ServiceDetails
 
 
 def str_or_none(value):
@@ -209,6 +209,6 @@ class Client(PahoClient):
         logger.setLevel(logging.INFO)
         return mqtt_client
 
-    def publish_service_details(self, details: ServiceType):
+    def publish_service_details(self, details: ServiceDetails):
         name = [details.id] # no display name because the service does not have to know about it.
-        self.publish(Topic(payload_type=ServiceType, context=details.hierarchy + name), details, retain=True)
+        self.publish(Topic(payload_type=ServiceDetails, context=details.hierarchy + name), details, retain=True)

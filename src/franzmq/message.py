@@ -1,6 +1,6 @@
 from paho.mqtt.client import MQTTMessage as PahoMQTTMessage
-from franzmq.data_contracts.base.topic import Topic
-from franzmq.data_contracts.base.payload import Payload
+from franzmq.topic import Topic 
+from franzmq.data_contracts.base import Payload
 from paho.mqtt.client import MQTTMessageInfo, Properties, MessageState
 import datetime
 import time
