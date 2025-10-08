@@ -42,7 +42,7 @@ class Client(PahoClient):
         topic_prefix: str = "logs",
         format_string: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     ) -> None:
-        from franzmq.data_contracts.base.log_handlers import configure_logging
+        from franzmq.log_handlers import configure_logging
         configure_logging(self, level, topic_prefix, format_string)
         return None
 

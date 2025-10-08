@@ -8,11 +8,10 @@ from enum import Enum
 import datetime
 import time
 import logging
-from ..utils import StrEnum, CustomEncoder
 
-# class StrEnum(str, Enum):
-    # def __str__(self):
-        # return self.value
+class StrEnum(str, Enum):
+    def __str__(self):
+        return self.value
 
 class ServiceType(StrEnum):
     CONNECTOR = "connector"
@@ -51,24 +50,11 @@ class DataType(StrEnum):
     DATETIME_ARRAY = "datetime_array"
 
 
-# class CustomEncoder(json.JSONEncoder):
-    # def default(self, obj):
-        # if isinstance(obj, ServiceType):
-            # return str(obj)
-        # if isinstance(obj, datetime.datetime):
-            # return obj.isoformat()
-        # if isinstance(obj, IndexType):
-            # return str(obj)
-        # if isinstance(obj, DataType):
-            # return str(obj)
-        
-        # return super().default(obj)
-
 @dataclass
 class Payload(ABC):
 
     def encode(self):
-        return json.dumps(self.__dict__, cls=CustomEncoder)
+        return json.dumps(self.__dict__)
 
     @classmethod
     def decode(cls, json_str, timestamp: int):
@@ -122,7 +108,7 @@ class Metric(Payload):
             data["timestamp"] = datetime.datetime.fromisoformat(data["timestamp"]).timestamp()
         logging.info(f"Encoding Metric with timestamp: {data['timestamp']} of type {type(data['timestamp'])}")
         
-        return json.dumps(data, cls=CustomEncoder)
+        return json.dumps(data)
 
     @classmethod
     def decode(cls, json_str, timestamp: int):
