@@ -1,7 +1,7 @@
 import time
-from franzmq.client import Client
-from franzmq.topic import Topic
-from franzmq.payload import Metric
+from franzmq import Client
+from franzmq import Topic
+from franzmq.data_contracts.base import Metric
 
 # EXAMPLE: Two callbacks with different priorities
 

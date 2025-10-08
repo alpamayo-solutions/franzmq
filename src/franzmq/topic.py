@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union, TypedDict, Literal
-from franzmq.data_contracts.base.payload import Payload, PAYLOAD_CLASSES
+from franzmq.data_contracts.base import Payload, PAYLOAD_CLASSES
 
 SINGLE_LEVEL_WILDCARD = "+"
 MULTI_LEVEL_WILDCARD = "#"
@@ -195,7 +195,7 @@ class Isa95Topic(Topic):
         )
 
 if __name__ == "__main__":
-    from franzmq.data_contracts.base.payload import Metric
+    from franzmq.data_contracts.base import Metric
     # Create a basic Topic
     basic_topic = Topic(prefix="example", version="v1", payload_type=Metric, context=("sensor", "temperature"))
     print("Basic Topic:", basic_topic)

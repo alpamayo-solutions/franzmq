@@ -1,5 +1,5 @@
 import logging
-from franzmq.client import Client
+from franzmq import Client
 from franzmq.log_handlers import configure_logging
 
 # EXAMPLE: Integrating Python's built in logging framework with MQTT

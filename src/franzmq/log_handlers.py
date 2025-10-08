@@ -1,9 +1,8 @@
 import logging
 import datetime
-from franzmq.data_contracts.base.payload import Log
-from franzmq.data_contracts.base.client import Client
-from franzmq.data_contracts.base.topic import Topic
-
+from franzmq.data_contracts.base import Log
+from franzmq.client import Client
+from franzmq.topic import Topic
 class MQTTHandler(logging.Handler):
 
     def __init__(self, mqtt_client: "Client", topic_prefix: str = "logs"):
