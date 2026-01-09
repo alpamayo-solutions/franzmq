@@ -3,6 +3,8 @@ import datetime
 from franzmq.data_contracts.base import Log
 from franzmq.client import Client
 from franzmq.topic import Topic
+
+
 class MQTTHandler(logging.Handler):
 
     def __init__(self, mqtt_client: "Client", topic_prefix: str = "logs"):
@@ -20,7 +22,7 @@ class MQTTHandler(logging.Handler):
                 module=record.module,
                 function=record.funcName,
                 line_no=record.lineno,
-                exc_info=self.formatException(record.exc_info) if record.exc_info else None,
+                exc_info=self.formatter.formatException(record.exc_info) if record.exc_info and self.formatter else None,
                 extra=getattr(record, 'extra', None)
             )
 
