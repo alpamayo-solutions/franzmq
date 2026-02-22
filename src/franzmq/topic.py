@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union, TypedDict, Literal
-from franzmq.data_contracts.base import Payload, PAYLOAD_CLASSES
+from franzmq.data_contracts.base import Payload, Cmd, Ack
+from franzmq.data_contracts import PAYLOAD_CLASSES
 
 SINGLE_LEVEL_WILDCARD = "+"
 MULTI_LEVEL_WILDCARD = "#"
@@ -82,6 +83,30 @@ class Topic:
 
     def endswith(self, *args, **kwargs):
         return str(self).endswith(*args, **kwargs)
+
+    def __eq__(self, other):
+        if isinstance(other, (Topic, str)):
+            return str(self) == str(other)
+        return NotImplemented
+
+    def __ne__(self, other):
+        equal = self.__eq__(other)
+        if equal is NotImplemented:
+            return NotImplemented
+        return not equal
+
+    def __hash__(self):
+        return hash(str(self))
+
+    def to_ack_topic(self) -> "Topic":
+        if not issubclass(self.payload_type, Cmd):
+            raise ValueError("ACK topics are only available for command topics.")
+        return Topic(
+            prefix=self.prefix,
+            version=self.version,
+            payload_type=Ack,
+            context=self.context
+        )
 
     def validate_topic(self, topic: str) -> None:
         """Validate the MQTT topic string for correct wildcard usage."""

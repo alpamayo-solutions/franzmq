@@ -4,14 +4,15 @@ from typing import Any, Optional, Dict, List
 import sys
 import inspect
 from dataclasses import dataclass, field
-from enum import Enum   
+from enum import Enum
 import datetime
 import time
-import logging
+
 
 class StrEnum(str, Enum):
     def __str__(self):
         return self.value
+
 
 class ServiceType(StrEnum):
     CONNECTOR = "connector"
@@ -30,12 +31,14 @@ class ServiceType(StrEnum):
     PY_DATA_OPS = "py-data-ops"
     REVERSE_PROXY = "reverse-proxy"
     AUTH_SERVICE = "auth-service"
-    MCP_SERVER="mcp-server"
+    MCP_SERVER = "mcp-server"
+
 
 class IndexType(StrEnum):
     TIME = "time"
     NUMERICAL = "numerical"
     NONE = "none"
+
 
 class DataType(StrEnum):
     INT = "int"
@@ -50,11 +53,24 @@ class DataType(StrEnum):
     DATETIME_ARRAY = "datetime_array"
 
 
+class CustomEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, ServiceType):
+            return str(obj)
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        if isinstance(obj, IndexType):
+            return str(obj)
+        if isinstance(obj, DataType):
+            return str(obj)
+        return super().default(obj)
+
+
 @dataclass
 class Payload(ABC):
 
     def encode(self):
-        return json.dumps(self.__dict__)
+        return json.dumps(self.__dict__, cls=CustomEncoder)
 
     @classmethod
     def decode(cls, json_str, timestamp: int):
@@ -66,26 +82,13 @@ class Payload(ABC):
     def get_identifier(cls) -> str:
         return "_" + cls.__name__
 
+
 @dataclass
 class ServiceDetails(Payload):
     name: str
     service_type: ServiceType
     metadata: Dict[str, Any] = field(default_factory=dict)
     hierarchy: List[str] = field(default_factory=list)
-
-    # @classmethod
-    # def decode(cls, json_str, timestamp: int):
-    #     data = json.loads(json_str)
-    #     data.pop("version", None)
-    #     if "name" not in data and "id" in data:
-    #         data["name"] = data.pop("id")
-    #     return cls(**data)
-
-    # @property
-    # def __dict__(self):
-    #     d = super().__dict__.copy()
-    #     d["id"] = self.name
-    #     return d
 
 
 @dataclass
@@ -95,7 +98,6 @@ class Metric(Payload):
 
     @property
     def timestamp_dt(self) -> datetime.datetime:
-        # If timestamp is from time.monotonic(), convert it to a Unix timestamp
         if isinstance(self.timestamp, str):
             return datetime.datetime.fromisoformat(self.timestamp)
         if not isinstance(self.timestamp, datetime.datetime) and self.timestamp < 1000000000:
@@ -106,9 +108,7 @@ class Metric(Payload):
         data = self.__dict__.copy()
         if isinstance(data["timestamp"], str):
             data["timestamp"] = datetime.datetime.fromisoformat(data["timestamp"]).timestamp()
-        logging.info(f"Encoding Metric with timestamp: {data['timestamp']} of type {type(data['timestamp'])}")
-        
-        return json.dumps(data)
+        return json.dumps(data, cls=CustomEncoder)
 
     @classmethod
     def decode(cls, json_str, timestamp: int):
@@ -116,6 +116,7 @@ class Metric(Payload):
         if isinstance(data["timestamp"], str):
             data["timestamp"] = datetime.datetime.fromisoformat(data["timestamp"]).timestamp()
         return cls(**data)
+
 
 @dataclass
 class Log(Payload):
@@ -130,8 +131,24 @@ class Log(Payload):
     extra: Optional[dict[str, Any]] = None
 
 
-PAYLOAD_CLASSES = {
-    cls.get_identifier(): cls
-    for _, cls in inspect.getmembers(sys.modules[__name__], inspect.isclass)
-    if issubclass(cls, Payload) and cls != Payload
-}
+@dataclass
+class Cmd(Payload):
+    created_at: float
+    correlation_id: str
+    expires_at: float
+    command: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def __dict__(self):
+        d = super().__dict__.copy()
+        if not isinstance(self.command, dict):
+            d["command"] = self.command.__dict__
+        return d
+
+
+@dataclass
+class Ack(Payload):
+    correlation_id: str
+    performed_at: Optional[float] = None
+    result_code: int = 200
+    message: str = ""

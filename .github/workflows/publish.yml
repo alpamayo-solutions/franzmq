@@ -2,12 +2,17 @@ name: Build & Publish
 
 on:
   push:
-    tags: 
+    tags:
         - 'v*'
+    branches:
+        - staging
 
 jobs:
   build-publish:
     runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +25,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build twine
 
+      - name: Set beta version for staging
+        if: github.ref == 'refs/heads/staging'
+        run: |
+          VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          sed -i "s/^version = \".*\"/version = \"${VERSION}b${GITHUB_RUN_NUMBER}\"/" pyproject.toml
+
       - name: Build sdist and wheel
         run: python -m build
 
@@ -28,5 +39,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
