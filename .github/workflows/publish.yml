@@ -31,7 +31,7 @@ jobs:
       - name: Set beta version for staging
         if: github.ref == 'refs/heads/staging'
         run: |
-          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           sed -i "s/^version = \".*\"/version = \"${VERSION}b${GITHUB_RUN_NUMBER}\"/" pyproject.toml
 
       - name: Build sdist and wheel
