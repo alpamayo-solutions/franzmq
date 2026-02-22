@@ -10,7 +10,7 @@ on:
 jobs:
   build-publish:
     runs-on: ubuntu-latest
-    environment: testpypi
+    environment: pypi
     permissions:
       id-token: write
     steps:
@@ -25,9 +25,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build twine
 
-      - name: Override package name for TestPyPI
-        run: sed -i 's/^name = "franzmq"/name = "franzmq-test"/' pyproject.toml
-
       - name: Set beta version for staging
         if: github.ref == 'refs/heads/staging'
         run: |
@@ -40,7 +37,5 @@ jobs:
       - name: Check the built package
         run: twine check dist/*
 
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
