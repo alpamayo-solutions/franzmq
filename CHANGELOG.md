@@ -2,6 +2,12 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`Client.publish_tombstone(topic, qos=0)`** -- publish an empty retained payload to clear a previously retained topic. Always sends `retain=True`. Use this to retract a retained `Payload` from the broker, e.g. when deleting an asset whose state was kept under a retained topic. Previously, calling `publish(topic, None)` crashed with `AttributeError: 'NoneType' object has no attribute 'encode'`.
+
 ## [0.4.0] - 2026-02-22
 
 ### Breaking Changes
