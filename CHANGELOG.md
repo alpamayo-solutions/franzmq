@@ -2,7 +2,7 @@
 
 All notable changes to franzmq are documented in this file.
 
-## [Unreleased]
+## [0.4.1] - 2026-05-12
 
 ### Added
 
