@@ -85,6 +85,16 @@ class Client(PahoClient):
     def publish(self, topic: Topic, payload: Payload, qos=0, retain=False):
         super().publish(str(topic), payload.encode(), qos, retain)
 
+    def publish_tombstone(self, topic: Topic, qos: int = 0):
+        """Publish an empty retained payload to clear a retained topic.
+
+        MQTT brokers remove a topic's retained message when they receive an
+        empty payload on it. Use this to retract a previously retained
+        ``Payload``. Always sends ``retain=True`` because tombstones only make
+        sense against retained topics.
+        """
+        super().publish(str(topic), b"", qos, retain=True)
+
     def subscribe(self, topic: Topic | str, qos: int = 0, callback=None, priority: int = 0):
         """
         Subscribe to a topic and (optionally) register a callback with an optional priority.
