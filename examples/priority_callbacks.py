@@ -8,7 +8,7 @@ from franzmq.data_contracts.base import Metric
 client = Client.autocreate_and_connect(client_id="demo-subscriber")
 client.loop_start()
 
-topic = Topic(payload_type=Metric, context=("line-1", "motor-7", "speed"))
+topic = Topic(payload_type=Metric, node_id="demo-subscriber", context=("line-1", "motor-7", "speed"))
 
 def high_priority_cb(client, userdata, msg):
     print("[P2] urgent first:", msg.payload.value)

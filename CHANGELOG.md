@@ -2,6 +2,74 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.5.0] - 2026-08-17
+
+### Breaking Changes
+
+- **`Topic` carries the publisher's identity at level 4.** The v1 wire shape is
+  now `{prefix}/{version}/_{PayloadType}/{node_id}/{context…}`. `Topic` gained a
+  required `node_id` field, positioned directly after `payload_type`; `__str__`
+  emits it, `from_str` reads segment 3 into it and everything from segment 4 into
+  `context`, and `to_ack_topic()` preserves it. `+` is accepted as `node_id` in
+  subscription filters.
+
+  Before:
+  ```python
+  Topic(payload_type=Metric, context=("sensor", "temperature"))
+  # example/v1/_Metric/sensor/temperature
+  ```
+
+  After:
+  ```python
+  Topic(payload_type=Metric, node_id="machine-1", context=("sensor", "temperature"))
+  # example/v1/_Metric/machine-1/sensor/temperature
+  ```
+
+  There is no dual mode: the old shape is gone. Brokers that enforce an identity
+  rule match level 4 against the authenticated client, and every hop that
+  re-mounts a record rewrites only the path after it — both are impossible
+  without the level. Pin `franzmq==0.4.1` for services still speaking the old
+  scheme; the pin is the per-service migration switch.
+
+- **A v1 topic must have a path.** A topic with a `node_id` and an empty
+  `context` is rejected, because the level-4 identity is not a hierarchy
+  position. The single exception is the pathless-contract set
+  (`franzmq.topic.PATHLESS_CONTRACTS`, currently `_TimeSync`), which mirrors the
+  broker-side grammar.
+
+- **ISA-95 conversion names the publisher explicitly.** `Isa95Topic.to_topic()`
+  now takes `node_id`, and `Topic.from_str()` raises on a `v1-isa95` string
+  instead of silently converting: ISA-95 topics address the hierarchy through
+  their own levels and carry no identity to carry over. `Isa95Topic` itself —
+  its fields, its rendering, its `from_str` — is unchanged.
+
+- **`TopicBase._topic()` takes a `node_id`**, defaulting to the class's own
+  `node_id` attribute.
+
+### Added
+
+- **`Client.node_id`** — the identity used for topics the client builds itself
+  (`publish_service_details`, the MQTT log handler). Read from the `NODE_ID`
+  environment variable, and defaulted to the client id by
+  `autocreate_and_connect`. `Client.require_node_id()` raises a message naming
+  all three ways to set it rather than failing deep inside `Topic`.
+
+- **Golden topic-transformation vectors** (`tests/vectors/topic_transformations.json`,
+  a copy of the canonical file in `prekit-data-contracts`) drive the topic suite.
+  The same cases are judged by the Go broker-side implementation, so the two
+  cannot drift apart silently — changing a case is a protocol change and needs
+  both suites green.
+
+- **CI runs the test suite** on every push and pull request, and publishing is
+  gated on it.
+
+### Fixed
+
+- `tests/test_logging.py` was a manual script that connected to a live broker at
+  import time and could only ever error during collection. It is now a real unit
+  test of the log handler's topic construction; the runnable demo already lived
+  in `examples/log_handler.py`.
+
 ## [0.4.1] - 2026-05-12
 
 ### Added

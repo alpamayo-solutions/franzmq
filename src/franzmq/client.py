@@ -49,6 +49,14 @@ class Client(PahoClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Identity this client publishes under — level 4 of every v1 topic it
+        # builds itself (service details, logs). Brokers that enforce the
+        # identity rule match this against the authenticated client, so it must
+        # be the client's own id, not the tree position it sits at.
+        # `autocreate_and_connect` falls back to the client_id when NODE_ID is
+        # not set in the environment.
+        self.node_id: Optional[str] = config("NODE_ID", default=None, cast=str_or_none)
+
         self._on_connect_callbacks = []
         self._on_message_callbacks = []
         self._on_disconnect_callbacks = []
@@ -712,6 +720,8 @@ class Client(PahoClient):
         mqtt_password = config("MQTT_PASSWORD", default="franz", cast=str_or_none)
 
         mqtt_client = Client(client_id=client_id)
+        if not mqtt_client.node_id:
+            mqtt_client.node_id = client_id
         mqtt_client.configure_mqtt_logger()
         mqtt_client.reconnect_on_failure = True
         mqtt_client.reconnect_on_offline = True
@@ -765,4 +775,27 @@ class Client(PahoClient):
 
     def publish_service_details(self, details: ServiceDetails):
         name = [details.name]
-        self.publish(Topic(payload_type=ServiceDetails, context=details.hierarchy + name), details, retain=True)
+        self.publish(
+            Topic(
+                payload_type=ServiceDetails,
+                node_id=self.require_node_id(),
+                context=tuple(details.hierarchy) + tuple(name),
+            ),
+            details,
+            retain=True,
+        )
+
+    def require_node_id(self) -> str:
+        """Return the identity this client publishes under, or explain what is missing.
+
+        Topics built by the client itself (service details, logs) need it; a
+        client that never sets ``node_id`` would otherwise fail deep inside
+        ``Topic`` with no hint about where the value comes from.
+        """
+        if not self.node_id:
+            raise RuntimeError(
+                "Client.node_id is not set: v1 topics carry the publisher's identity at "
+                "level 4. Set the NODE_ID environment variable, assign client.node_id, or "
+                "build the client with Client.autocreate_and_connect(<id>)."
+            )
+        return self.node_id

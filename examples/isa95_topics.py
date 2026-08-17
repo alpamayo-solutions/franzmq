@@ -4,7 +4,7 @@ from franzmq.data_contracts.base import Metric
 
 # EXAMPLE: Model plant hierarchy in the topic path, then convert to plain topics for internal consumers
 
-basic = Topic(payload_type=Metric, context=("sensor", "pressure"))
+basic = Topic(payload_type=Metric, node_id="edge-17", context=("sensor", "pressure"))
 
 isa95 = Isa95Topic.from_topic(
     basic,
@@ -16,6 +16,8 @@ isa95 = Isa95Topic.from_topic(
 print("ISA-95:", str(isa95))
 # example/v1-isa95/acme/PLT-01/AREA-A/LINE-3/CELL-2/edge-17/_Metric/sensor/pressure
 
-# Parse back into a basic Topic (internal routing doesn’t need the ISA-95 prefix):
-parsed = Topic.from_str(str(isa95))
-print("Basic  :", str(parsed))  # example/v1/_Metric/sensor/pressure
+# Parse back into a basic Topic. ISA-95 topics address the hierarchy through
+# their own levels and carry no node identity, so the publisher has to be named
+# when crossing back into the v1 scheme:
+parsed = Isa95Topic.from_str(str(isa95)).to_topic(node_id="edge-17")
+print("Basic  :", str(parsed))  # example/v1/_Metric/edge-17/sensor/pressure

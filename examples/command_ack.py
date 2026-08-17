@@ -19,6 +19,7 @@ class DeviceSettingsCmd(Cmd):
 cmd_topic = Topic(
     prefix="demo",
     payload_type=DeviceSettingsCmd,
+    node_id="device-1",
     context=("device-1", "settings"),
 )
 

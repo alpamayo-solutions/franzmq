@@ -25,7 +25,7 @@ from franzmq import Client, Topic, Metric
 
 client = Client.autocreate_and_connect(client_id="my-client")
 
-topic = Topic(payload_type=Metric, context=("sensor", "temperature"))
+topic = Topic(payload_type=Metric, node_id="my-client", context=("sensor", "temperature"))
 metric = Metric(value=22.5)
 
 client.publish(topic, metric)
@@ -33,15 +33,21 @@ client.publish(topic, metric)
 
 ## Topics
 
-FranzMQ topics follow the structure `{prefix}/{version}/{_PayloadType}/{context...}`.
+FranzMQ topics follow the structure `{prefix}/{version}/{_PayloadType}/{node_id}/{context...}`.
+
+`node_id` is the identity the message is published under — the node or machine
+the record belongs to. It is required and always sits at level 4, directly after
+the payload type: brokers that enforce an identity rule match that level against
+the authenticated client, and every hop that re-mounts a record rewrites only the
+path *after* it. Subscription filters may use `+` there to span nodes.
 
 ### Basic Topic
 
 ```python
 from franzmq import Topic, Metric
 
-topic = Topic(payload_type=Metric, context=("sensor", "temperature"))
-# example/v1/_Metric/sensor/temperature
+topic = Topic(payload_type=Metric, node_id="machine-1", context=("sensor", "temperature"))
+# example/v1/_Metric/machine-1/sensor/temperature
 ```
 
 ### ISA-95 Topic
@@ -51,7 +57,7 @@ For enterprise-level communication with ISA-95 hierarchy levels:
 ```python
 from franzmq import Topic, Metric, Isa95Topic, Isa95Fields
 
-basic_topic = Topic(payload_type=Metric, context=("sensor", "temperature"))
+basic_topic = Topic(payload_type=Metric, node_id="machine-1", context=("sensor", "temperature"))
 
 isa95_fields = Isa95Fields(
     enterprise="ent1",
@@ -146,6 +152,7 @@ client = Client.autocreate_and_connect(client_id="sender")
 cmd_topic = Topic(
     prefix="myproject",
     payload_type=Cmd,
+    node_id="device1",
     context=("device1", "settings")
 )
 
@@ -172,6 +179,7 @@ client = Client.autocreate_and_connect(client_id="receiver")
 cmd_topic = Topic(
     prefix="myproject",
     payload_type=Cmd,
+    node_id="device1",
     context=("device1", "settings")
 )
 
@@ -220,7 +228,8 @@ from franzmq.data_contracts.base import ServiceDetails
 class DeviceTopic(TopicBase):
     prefix = "myproject"
     version = "v1"
-    context = ("device1",)
+    node_id = "device1"
+    context = ()
 
     @classproperty
     def State(cls):
@@ -237,6 +246,9 @@ Access topics as class attributes:
 DeviceTopic.State        # myproject/v1/_ServiceDetails/device1/state
 DeviceTopic.Temperature  # myproject/v1/_Metric/device1/temperature
 ```
+
+`node_id` may be set on the class (as above) or passed per topic:
+`cls._topic(["temperature"], payload_type=Metric, node_id="device2")`.
 
 Nested hierarchies use `_parent_class_name` and `_prefix` to compose topic paths from parent classes.
 
@@ -264,6 +276,7 @@ Uses [`python-decouple`](https://github.com/henriquebastos/python-decouple) for 
 | `CA_CERT_FILE` | If TLS | -- | CA certificate path |
 | `TLS_CERT_FILE` | If TLS | -- | Client certificate path |
 | `TLS_KEY_FILE` | If TLS | -- | Client private key path |
+| `NODE_ID` | No | client id | Identity written at level 4 of topics the client builds itself (service details, MQTT logs) |
 
 ## License
 

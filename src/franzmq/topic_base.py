@@ -34,14 +34,16 @@ class TopicBase(Topic):
         return None
 
     @classmethod
-    def _topic(cls, context_suffix: List[Union[str, int]], payload_type: type[Payload] = Metric):
+    def _topic(cls, context_suffix: List[Union[str, int]], payload_type: type[Payload] = Metric,
+               node_id: str = None):
         parent_class = cls._get_parent_class()
         if parent_class and cls._prefix is not None:
-            return parent_class._topic(cls._prefix + list(context_suffix), payload_type)
+            return parent_class._topic(cls._prefix + list(context_suffix), payload_type, node_id)
         return Topic(
             prefix=cls.prefix,
             version=cls.version,
             payload_type=payload_type,
+            node_id=node_id if node_id is not None else cls.node_id,
             context=cls.context + tuple(str(c) for c in context_suffix)
         )
 

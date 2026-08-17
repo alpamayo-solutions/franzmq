@@ -8,7 +8,13 @@ on:
         - staging
 
 jobs:
+  # A release gate that never runs is not a gate: the golden topic vectors must
+  # be green on the exact ref being published.
+  tests:
+    uses: ./.github/workflows/test.yml
+
   build-publish:
+    needs: tests
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

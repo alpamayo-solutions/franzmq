@@ -28,6 +28,7 @@ class MQTTHandler(logging.Handler):
 
             topic = Topic(
                 payload_type=Log,
+                node_id=self.mqtt_client.require_node_id(),
                 context=(record.name, record.levelname)
             )
 

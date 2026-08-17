@@ -15,7 +15,7 @@ class _DummyPayload(Payload):
 
 
 def _topic() -> Topic:
-    return Topic(payload_type=_DummyPayload, context=("a", "b"))
+    return Topic(payload_type=_DummyPayload, node_id="m1", context=("a", "b"))
 
 
 def test_publish_encodes_payload():
