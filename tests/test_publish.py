@@ -150,3 +150,25 @@ def test_a_tombstone_decodes_to_none():
 
     assert message.payload is None
     assert str(message.topic) == "example/v1/_DummyPayload/m1/a/b"
+
+
+def test_publishing_from_the_network_thread_does_not_wait():
+    """A blocking publish inside a callback would wait for a PUBACK that only
+    the blocked thread can deliver — it deadlocks until the timeout, always."""
+    client = Client()
+    client.publish_timeout = 30.0  # would hang this long if the guard were gone
+    result = {}
+
+    def publish_as_the_network_loop():
+        with patch.object(PahoClient, "publish", return_value=_Info(mid=1)):
+            start = time.monotonic()
+            client.publish(_topic(), DummyPayload(value=1), qos=1)
+            result["elapsed"] = time.monotonic() - start
+
+    thread = threading.Thread(target=publish_as_the_network_loop)
+    client._thread = thread  # paho's own handle on its network loop
+    thread.start()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive(), "publish from the network thread blocked"
+    assert result["elapsed"] < 1

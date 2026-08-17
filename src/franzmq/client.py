@@ -150,6 +150,19 @@ class Client(PahoClient):
             # QoS 0 has no PUBACK to wait for and no reason code to report.
             return super().publish(topic, data, qos, retain)
 
+        if wait and threading.current_thread() is self._thread:
+            # Publishing from inside a callback: the PUBACK can only be read by
+            # the network thread, which is the thread now asking to wait for it.
+            # Waiting here deadlocks until the timeout, every time. The publish
+            # still goes out — it just cannot be confirmed from here, so a
+            # caller that needs the broker's verdict must publish off this
+            # thread.
+            logger.debug(
+                "publish to %s runs on the network thread: sending without waiting for the "
+                "PUBACK (a rejection cannot be reported here)", topic,
+            )
+            wait = False
+
         with self._publish_lock:
             slot = _Inflight()
             self._inflight = slot

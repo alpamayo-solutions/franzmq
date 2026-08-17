@@ -306,6 +306,11 @@ except PublishRejected as err:
     logger.error("%s rejected: %s", err.topic, err.reason)
 ```
 
+Publishing from inside a callback (`on_connect`, a message handler) cannot wait:
+the PUBACK is delivered by the very thread that would be waiting. Those publishes
+are sent without confirmation. Publish off the network thread when you need the
+verdict.
+
 Only one QoS ≥ 1 publish is in flight at a time. That is deliberate: unbounded
 in-flight QoS-1 lets a reconnect replay an unacked message after a newer one is
 already on the wire, and it is what makes a reason code attributable to the

@@ -2,6 +2,17 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.6.2] - 2026-08-17
+
+### Fixed
+
+- **A QoS ≥ 1 publish from inside a callback no longer deadlocks.** The PUBACK
+  can only be read by the network thread, so waiting for it *on* that thread
+  blocks until the timeout, every time — which is what publishing retained state
+  from `on_connect` does. Such a publish now goes out without waiting (and says
+  so at debug level). A caller that needs the broker's verdict has to publish off
+  the network thread.
+
 ## [0.6.1] - 2026-08-17
 
 ### Fixed
