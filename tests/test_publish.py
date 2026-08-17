@@ -133,3 +133,20 @@ def test_qos1_publishes_are_serialized():
         second.join(timeout=1)
 
     assert not first.is_alive() and not second.is_alive()
+
+
+def test_a_tombstone_decodes_to_none():
+    """An empty payload retires the record; a consumer must see that, not a
+    decode error that leaves it acting on state which no longer exists."""
+    from franzmq.data_contracts import PAYLOAD_CLASSES
+
+    PAYLOAD_CLASSES[DummyPayload.get_identifier()] = DummyPayload
+    client = Client()
+    raw = MQTTMessage(1)
+    raw.topic = b"example/v1/_DummyPayload/m1/a/b"
+    raw.payload = b""
+
+    message = client._decode_message(raw)
+
+    assert message.payload is None
+    assert str(message.topic) == "example/v1/_DummyPayload/m1/a/b"

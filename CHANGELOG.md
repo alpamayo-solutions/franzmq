@@ -2,6 +2,16 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.6.1] - 2026-08-17
+
+### Fixed
+
+- **A tombstone reaches its subscriber.** An empty payload retires the record
+  at a topic; decoding it as a contract failed, so the message was dropped with
+  a log line and a consumer kept acting on state that no longer existed.
+  `message.payload` is now `None` for an empty payload, and callbacks can treat
+  that as the retirement it is.
+
 ## [0.6.0] - 2026-08-17
 
 Alignment release. franzmq is the client half of a broker contract, and the

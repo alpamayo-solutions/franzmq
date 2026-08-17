@@ -206,10 +206,18 @@ class Client(PahoClient):
         return super().unsubscribe(topic_str)
 
     def _decode_message(self, raw_message):
-        """Decode a raw paho MQTT message into a franzmq Message object."""
+        """Decode a raw paho MQTT message into a franzmq Message object.
+
+        An empty payload is a **tombstone** — the record at that topic was
+        retired — and arrives as ``message.payload is None``. Decoding it as a
+        contract would fail, and a consumer that never learns about the
+        retirement keeps acting on state that no longer exists.
+        """
         topic = Topic.from_str(raw_message.topic)
         if isinstance(raw_message.payload, Payload):
             decoded_payload = raw_message.payload
+        elif not raw_message.payload:
+            decoded_payload = None
         else:
             decoded_payload = topic.payload_type.decode(raw_message.payload, getattr(raw_message, 'timestamp', time.time()))
         return Message(
