@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 
 from franzmq import Client, Topic, Cmd, Message
 
-# EXAMPLE: Two-phase command/ack handshake over MQTT.
+# EXAMPLE: command/ack over MQTT.
 #
 # Receiver subscribes to a Cmd topic. Sender publishes a command and waits for
-# a final Ack. franzmq handles the handshake (-1) ack, expiration, and the
-# final ack with a result code internally.
+# the Ack. franzmq handles expiry (498 without running the callback) and maps
+# the callback's return value onto the ack's result code.
 
 
 @dataclass
@@ -50,7 +50,6 @@ def run_sender():
         topic=cmd_topic,
         command={"enabled": True, "interval_ms": 500},
         validity_duration=5.0,
-        max_command_duration=30.0,
     )
     print(f"[sender] ack: result_code={ack.result_code} message={ack.message!r}")
 

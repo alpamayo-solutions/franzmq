@@ -1,30 +1,59 @@
-"""Unit tests for franzmq.Client.publish and publish_tombstone."""
+"""Unit tests for publishing: encoding, tombstones, reason codes, ordering."""
+import threading
+import time
 from dataclasses import dataclass
 from unittest.mock import patch
 
-from paho.mqtt.client import Client as PahoClient
+import pytest
+from paho.mqtt.client import Client as PahoClient, MQTTMessage, MQTTMessageInfo
+from paho.mqtt.reasoncodes import ReasonCode
 
 from franzmq.client import Client
 from franzmq.data_contracts.base import Payload
+from franzmq.errors import PublishRejected, PublishTimeout
 from franzmq.topic import Topic
 
 
 @dataclass
-class _DummyPayload(Payload):
+class DummyPayload(Payload):
     value: int = 0
 
 
-def _topic() -> Topic:
-    return Topic(payload_type=_DummyPayload, node_id="m1", context=("a", "b"))
+def _topic(leaf: str = "b") -> Topic:
+    return Topic(payload_type=DummyPayload, node_id="m1", context=("a", leaf))
+
+
+class _Info:
+    """Stand-in for paho's MQTTMessageInfo."""
+
+    def __init__(self, mid: int):
+        self.mid = mid
+        self.rc = 0
+
+
+def _reason(value: int) -> ReasonCode:
+    return ReasonCode(4, identifier=value)  # 4 = PUBACK
+
+
+def _ack(client: Client, mid: int, value: int = 0) -> None:
+    """Deliver a PUBACK the way paho's packet handler would.
+
+    paho pops the out-message after the callback, so the entry has to exist —
+    with `PahoClient.publish` patched out, nothing registered it.
+    """
+    msg = MQTTMessage(mid)
+    msg.qos = 0  # keeps paho's inflight accounting out of a synthetic ack
+    msg.info = MQTTMessageInfo(mid)
+    client._out_messages[mid] = msg
+    client._do_on_publish(mid, _reason(value), None)
 
 
 def test_publish_encodes_payload():
     client = Client()
     with patch.object(PahoClient, "publish") as mock_publish:
-        client.publish(_topic(), _DummyPayload(value=7))
-    mock_publish.assert_called_once()
+        client.publish(_topic(), DummyPayload(value=7), qos=0)
     args, _ = mock_publish.call_args
-    assert args[1] == _DummyPayload(value=7).encode()
+    assert args[1] == DummyPayload(value=7).encode()
     assert args[2] == 0
     assert args[3] is False
 
@@ -33,17 +62,74 @@ def test_publish_tombstone_sends_empty_retained_payload():
     client = Client()
     with patch.object(PahoClient, "publish") as mock_publish:
         client.publish_tombstone(_topic())
-    mock_publish.assert_called_once()
-    args, kwargs = mock_publish.call_args
+    args, _ = mock_publish.call_args
     assert args[1] == b""
     assert args[2] == 0
-    assert kwargs.get("retain", args[3] if len(args) > 3 else None) is True
+    assert args[3] is True
 
 
-def test_publish_tombstone_passes_custom_qos():
+def test_qos1_publish_waits_for_the_puback():
     client = Client()
-    with patch.object(PahoClient, "publish") as mock_publish:
-        client.publish_tombstone(_topic(), qos=1)
-    args, kwargs = mock_publish.call_args
-    assert args[2] == 1
-    assert kwargs.get("retain", args[3] if len(args) > 3 else None) is True
+    with patch.object(PahoClient, "publish", return_value=_Info(mid=1)):
+        threading.Timer(0.05, lambda: _ack(client, 1)).start()
+        start = time.monotonic()
+        client.publish(_topic(), DummyPayload(value=1), qos=1)
+    assert time.monotonic() - start >= 0.05
+
+
+def test_a_rejecting_puback_raises_with_the_topic_and_the_reason():
+    client = Client()
+    with patch.object(PahoClient, "publish", return_value=_Info(mid=1)):
+        threading.Timer(0.01, lambda: _ack(client, 1, 0x99)).start()
+        with pytest.raises(PublishRejected) as exc:
+            client.publish(_topic(), DummyPayload(value=1), qos=1)
+    assert exc.value.reason_code == 0x99
+    assert "payload" in str(exc.value)
+    assert str(_topic()) in str(exc.value)
+
+
+def test_a_silent_broker_times_out_rather_than_blocking_forever():
+    client = Client()
+    client.publish_timeout = 0.05
+    with patch.object(PahoClient, "publish", return_value=_Info(mid=1)):
+        with pytest.raises(PublishTimeout):
+            client.publish(_topic(), DummyPayload(value=1), qos=1)
+
+
+def test_fire_and_forget_skips_the_wait():
+    client = Client()
+    with patch.object(PahoClient, "publish", return_value=_Info(mid=1)):
+        info = client.publish(_topic(), DummyPayload(value=1), qos=1, wait=False)
+    assert info.mid == 1
+
+
+def test_qos1_publishes_are_serialized():
+    """A second publish must not reach the wire before the first is acked.
+
+    Unbounded in-flight QoS-1 is what lets a reconnect replay an unacked
+    message after a newer one already went out.
+    """
+    client = Client()
+    sent = []
+
+    def fake_publish(topic, *_args, **_kwargs):
+        sent.append(topic)
+        return _Info(mid=len(sent))
+
+    with patch.object(PahoClient, "publish", side_effect=fake_publish):
+        first = threading.Thread(target=lambda: client.publish(_topic("one"), DummyPayload(), qos=1))
+        first.start()
+        time.sleep(0.05)
+        second = threading.Thread(target=lambda: client.publish(_topic("two"), DummyPayload(), qos=1))
+        second.start()
+        time.sleep(0.05)
+
+        assert sent == [str(_topic("one"))], "second publish went out before the first was acked"
+        _ack(client, 1)
+        first.join(timeout=1)
+        time.sleep(0.05)
+        assert sent == [str(_topic("one")), str(_topic("two"))]
+        _ack(client, 2)
+        second.join(timeout=1)
+
+    assert not first.is_alive() and not second.is_alive()

@@ -2,6 +2,62 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.6.0] - 2026-08-17
+
+Alignment release. franzmq is the client half of a broker contract, and the
+broker changed: authentication, protocol version and acknowledgement semantics
+all moved. There is no compatibility mode — services still speaking the old
+model pin `0.4.1`, and that pin is their migration switch.
+
+### Breaking Changes
+
+- **Authentication is the pinned-key model.** The ed25519 identity key named by
+  `MACHINE_KEY` is the credential: the client mints a self-signed certificate
+  from it in-process and presents that, and the broker decides by looking up the
+  public key among the identities enrolled there. There is no CA and nothing
+  validates the broker in return — trust runs the other way.
+  `MQTT_USERNAME`, `MQTT_PASSWORD`, `USE_MQTTS`, `CA_CERT_FILE` and
+  `TLS_CERT_FILE` are **removed**; `TLS_KEY_FILE` is replaced by `MACHINE_KEY`.
+  The MQTT username and the client id are both the identity.
+
+- **MQTT 5 and callback API v2.** On MQTT 3.1.1 a PUBACK carries no reason
+  field, so a broker that rejects a publish still acknowledges it and the
+  publisher reads the rejection as success. Every client this library builds is
+  now on MQTT 5, which forces paho's v2 callback signatures:
+  `on_connect(client, userdata, flags, reason_code, properties)`,
+  `on_publish(client, userdata, mid, reason_code, properties)`,
+  `on_subscribe(client, userdata, mid, reason_code_list, properties)`.
+
+- **QoS ≥ 1 publishes wait for their PUBACK, one at a time, and raise on
+  rejection.** `publish()` raises `PublishRejected` (with the topic and the
+  reason) or `PublishTimeout`. Unbounded in-flight QoS-1 is not a throughput
+  knob: an ordinary reconnect replays whatever is still unacked, out of order,
+  after newer messages are already on the wire. Pass `wait=False` for the old
+  fire-and-forget behaviour.
+
+- **The two-phase command handshake is gone.** One command, one ack.
+  `result_code=-1` and `max_command_duration` no longer exist; the sender waits
+  until the command's own expiry. Result codes are the broker's: `200` done,
+  `409` conflict, `422` invalid, `498` expired before execution, `500` internal
+  (including an exception in the callback — previously `598`).
+
+- **Sessions persist.** Connections use `clean_start=False` with a session
+  expiry interval (`MQTT_SESSION_EXPIRY`, default: never expires), so commands
+  issued while a client was away arrive on reconnect.
+
+### Added
+
+- `franzmq.pinned_tls` — `load_identity_key`, `self_signed_cert_pem`,
+  `self_signed_context`.
+- `franzmq.errors` — `FranzmqError`, `PublishRejected`, `PublishTimeout`, and
+  `REASONS` mapping each broker reason code to what it means for the publisher.
+- `Client.make_command_handler(callback, qos)` — the ack rules (expiry, result
+  mapping, exceptions) as a reusable handler, testable without a broker.
+
+### Fixed
+
+- The MQTT log handler no longer calls the deprecated `datetime.utcnow()`.
+
 ## [0.5.0] - 2026-08-17
 
 ### Breaking Changes

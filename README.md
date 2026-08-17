@@ -6,10 +6,11 @@ FranzMQ is a structured MQTT communication library for edge and cloud applicatio
 
 - **Typed payloads** using Python dataclasses with automatic JSON encoding/decoding
 - **Priority-based concurrent callbacks** for message handling
-- **Command/acknowledge pattern** with two-phase handshake for request-response over MQTT
+- **Command/acknowledge pattern** for confirmed request-response over MQTT
 - **Class-based topic definitions** for type-safe, hierarchical topic construction
 - **ISA-95 topic modeling** for enterprise-ready messaging structures
-- **TLS support** with environment-based auto-configuration
+- **Pinned-key authentication** — the identity key is the credential, no CA
+- **MQTT 5** with broker reason codes surfaced as exceptions
 - **MQTT-based logging** with seamless integration
 
 ## Installation
@@ -113,7 +114,7 @@ Callbacks are ordered by descending priority (higher numbers run first). Callbac
 
 ## Command/Acknowledge Pattern
 
-FranzMQ supports request-response semantics over MQTT using a two-phase acknowledgement flow. This avoids the need for a separate API when you need confirmed command execution.
+FranzMQ supports request-response semantics over MQTT. One command gets one acknowledgement, carrying the broker's own result codes.
 
 ### Flow
 
@@ -122,27 +123,26 @@ Sender                          Receiver
   |                               |
   |-- Cmd (correlation_id) ------>|
   |                               | (check expiration)
-  |<-- Ack (result_code=-1) ------| (handshake)
   |                               | (execute callback)
-  |<-- Ack (result_code=200) -----| (final result)
+  |<-- Ack (result_code) ---------|
   |                               |
 ```
 
-The handshake ack (`result_code=-1`) confirms the receiver is alive and processing. If the handshake arrives before the command expires, the sender extends its wait up to `max_command_duration`.
+The sender waits until the command's own expiry. A command that expires before it is executed is acked `498` without running the callback.
 
 ### Result codes
 
 | Code | Meaning |
 |------|---------|
-| -1 | Handshake (receiver acknowledged receipt) |
-| 200 | Success |
-| 400 | Bad request |
-| 500 | Internal error or timeout |
-| 598 | Exception in command callback |
+| 200 | Done |
+| 409 | Conflict — the request contradicts current state |
+| 422 | Invalid — the request could not be understood |
+| 498 | Expired before execution |
+| 500 | Internal error, including an exception in the callback |
 
 ### Sending commands
 
-`publish_command` subscribes to the ack topic, publishes the command, waits for the two-phase response, and returns the final `Ack`.
+`publish_command` subscribes to the ack topic, publishes the command, waits for the ack, and returns it.
 
 ```python
 from franzmq import Client, Topic, Cmd, Ack
@@ -160,7 +160,6 @@ ack = client.publish_command(
     topic=cmd_topic,
     command={"enabled": True, "interval_ms": 500},
     validity_duration=30.0,
-    max_command_duration=60.0,
 )
 
 if ack.result_code >= 500:
@@ -169,7 +168,7 @@ if ack.result_code >= 500:
 
 ### Receiving commands
 
-`subscribe_to_command` handles expiration checks, handshake acks, and final acks automatically. The callback receives a `Message` and returns a result code.
+`subscribe_to_command` handles expiry and acknowledgement automatically. The callback receives a `Message` and returns a result code.
 
 ```python
 from franzmq import Client, Topic, Cmd, Message
@@ -268,15 +267,49 @@ Uses [`python-decouple`](https://github.com/henriquebastos/python-decouple) for 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `MACHINE_KEY` | **Yes** | -- | Path to the ed25519 identity key — the credential |
+| `NODE_ID` | No | client id | Identity: MQTT username, client id, and level 4 of every topic |
 | `MQTT_IP` | No | `broker` | Broker hostname |
-| `MQTT_PORT` | No | `8883` (TLS) / `1883` (plain) | Broker port |
-| `MQTT_USERNAME` | No | `franz` | Auth username |
-| `MQTT_PASSWORD` | No | `franz` | Auth password |
-| `USE_MQTTS` | No | `True` | Enable TLS |
-| `CA_CERT_FILE` | If TLS | -- | CA certificate path |
-| `TLS_CERT_FILE` | If TLS | -- | Client certificate path |
-| `TLS_KEY_FILE` | If TLS | -- | Client private key path |
-| `NODE_ID` | No | client id | Identity written at level 4 of topics the client builds itself (service details, MQTT logs) |
+| `MQTT_PORT` | No | `1883` | Broker port |
+| `MQTT_SESSION_EXPIRY` | No | never expires | Seconds the broker keeps the session after a disconnect |
+
+## Authentication
+
+The broker authenticates by **pinned key**, not by a certificate authority. Each
+client has an ed25519 private key; on connect it presents a certificate minted
+from that key in-process, and the broker looks up the public key inside among the
+identities enrolled there. An unknown key is refused. Nothing validates the
+broker in return, because no authority exists to validate it against — trust runs
+the other way.
+
+Generate a key with `colca-keygen` and enroll its public key at the node before
+the client's first connect.
+
+## Rejected publishes
+
+At QoS ≥ 1 `publish()` waits for the PUBACK and raises `PublishRejected` when the
+broker answers with a failure reason code:
+
+| Code | Meaning |
+|------|---------|
+| `0x90` | topic name invalid — the broker does not know this contract |
+| `0x99` | payload format invalid — the payload failed the contract schema |
+| `0x87` | not authorized — no grant covers this topic |
+| `0x89` | quota exceeded — the destination is draining |
+
+```python
+from franzmq.errors import PublishRejected
+
+try:
+    client.publish(topic, metric, qos=1)
+except PublishRejected as err:
+    logger.error("%s rejected: %s", err.topic, err.reason)
+```
+
+Only one QoS ≥ 1 publish is in flight at a time. That is deliberate: unbounded
+in-flight QoS-1 lets a reconnect replay an unacked message after a newer one is
+already on the wire, and it is what makes a reason code attributable to the
+message that earned it. Pass `wait=False` for fire-and-forget.
 
 ## License
 

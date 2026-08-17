@@ -4,15 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "franzmq"
-version = "0.5.0"
+version = "0.6.0"
 description = "Typed MQTT client and topic/payload model for ISA-95-ish messaging."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Alpamayo", email = "info@alpamayo-solutions.com" }]
 dependencies = [
-  "paho-mqtt>=2.0",        
-  "python-decouple>=3.8",  
+  "paho-mqtt>=2.0",
+  "python-decouple>=3.8",
+  # Mints the self-signed certificate the pinned-key auth model presents.
+  "cryptography>=42",
 ]
 
 # These show up on PyPI

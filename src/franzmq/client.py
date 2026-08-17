@@ -8,8 +8,12 @@ import pathlib
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from decouple import config
-from paho.mqtt.client import Client as PahoClient
+from paho.mqtt.client import Client as PahoClient, CallbackAPIVersion, MQTTv5
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
+from franzmq.errors import PublishRejected, PublishTimeout
+from franzmq.pinned_tls import self_signed_context
 from franzmq.topic import Topic
 from franzmq.message import Message
 from franzmq.data_contracts.base import Payload, ServiceDetails, Cmd, Ack
@@ -45,9 +49,29 @@ def path_or_none(value):
     return pathlib.Path(value)
 
 
+#: How long a QoS≥1 publish waits for its PUBACK before giving up.
+DEFAULT_PUBLISH_TIMEOUT = 10.0
+
+
+class _Inflight:
+    """The single QoS≥1 publish currently awaiting its PUBACK."""
+
+    __slots__ = ("event", "mid", "reason_code")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.mid: Optional[int] = None
+        self.reason_code: int = 0
+
+
 class Client(PahoClient):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # MQTT 5 is not optional: on 3.1.1 a PUBACK has no reason field, so a
+        # broker that rejects a publish still acknowledges it and the publisher
+        # reads the rejection as success. Callback API v2 comes with it — it is
+        # the only version that hands the reason code to on_publish.
+        kwargs.setdefault("protocol", MQTTv5)
+        super().__init__(CallbackAPIVersion.VERSION2, *args, **kwargs)
 
         # Identity this client publishes under — level 4 of every v1 topic it
         # builds itself (service details, logs). Brokers that enforce the
@@ -56,6 +80,16 @@ class Client(PahoClient):
         # `autocreate_and_connect` falls back to the client_id when NODE_ID is
         # not set in the environment.
         self.node_id: Optional[str] = config("NODE_ID", default=None, cast=str_or_none)
+
+        self.publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT
+        # One QoS≥1 publish in flight at a time. Unbounded in-flight QoS-1 is
+        # not just a throughput knob: an ordinary reconnect replays whatever is
+        # still unacked from paho's message store, out of order, after newer
+        # messages are already on the wire. Serializing on PUBACK removes that
+        # race, and it is also what makes a reason code attributable to the
+        # message that earned it.
+        self._publish_lock = threading.Lock()
+        self._inflight: Optional[_Inflight] = None
 
         self._on_connect_callbacks = []
         self._on_message_callbacks = []
@@ -70,7 +104,7 @@ class Client(PahoClient):
         self._topic_callbacks_lock = threading.Lock()
 
         # Command/Ack state
-        self._pending_commands = {}  # key: correlation_id, value: (event, ack_result, handshake_received)
+        self._pending_commands = {}  # key: correlation_id, value: (event, ack_result)
         self._pending_commands_lock = threading.Lock()
 
         self._ack_topic_subscriptions = {}  # key: ack_topic_str, value: set of correlation_ids
@@ -90,10 +124,18 @@ class Client(PahoClient):
         configure_logging(self, level, topic_prefix, format_string)
         return None
 
-    def publish(self, topic: Topic, payload: Payload, qos=0, retain=False):
-        super().publish(str(topic), payload.encode(), qos, retain)
+    def publish(self, topic: Topic, payload: Payload, qos=0, retain=False, wait: bool = True):
+        """Publish a typed payload.
 
-    def publish_tombstone(self, topic: Topic, qos: int = 0):
+        At QoS ≥ 1 this waits for the PUBACK and raises :class:`PublishRejected`
+        when the broker answers with a failure reason code — a rejected publish
+        must not look like a successful one. Pass ``wait=False`` for
+        fire-and-forget, accepting that rejections and ordering become your
+        problem.
+        """
+        return self._publish_bytes(str(topic), payload.encode(), qos, retain, wait)
+
+    def publish_tombstone(self, topic: Topic, qos: int = 0, wait: bool = True):
         """Publish an empty retained payload to clear a retained topic.
 
         MQTT brokers remove a topic's retained message when they receive an
@@ -101,7 +143,37 @@ class Client(PahoClient):
         ``Payload``. Always sends ``retain=True`` because tombstones only make
         sense against retained topics.
         """
-        super().publish(str(topic), b"", qos, retain=True)
+        return self._publish_bytes(str(topic), b"", qos, True, wait)
+
+    def _publish_bytes(self, topic: str, data: bytes, qos: int, retain: bool, wait: bool):
+        if qos == 0:
+            # QoS 0 has no PUBACK to wait for and no reason code to report.
+            return super().publish(topic, data, qos, retain)
+
+        with self._publish_lock:
+            slot = _Inflight()
+            self._inflight = slot
+            try:
+                info = super().publish(topic, data, qos, retain)
+                slot.mid = info.mid
+                if not wait:
+                    return info
+                if not slot.event.wait(self.publish_timeout):
+                    raise PublishTimeout(topic, self.publish_timeout)
+                if slot.reason_code >= 0x80:
+                    raise PublishRejected(slot.reason_code, topic)
+                return info
+            finally:
+                self._inflight = None
+
+    def _do_on_publish(self, mid, reason_code, properties):
+        # paho's internal PUBACK hook. Capturing here rather than on the public
+        # on_publish callback keeps that callback free for the application.
+        slot = self._inflight
+        if slot is not None and (slot.mid is None or slot.mid == mid):
+            slot.reason_code = int(getattr(reason_code, "value", reason_code) or 0)
+            slot.event.set()
+        return super()._do_on_publish(mid, reason_code, properties)
 
     def subscribe(self, topic: Topic | str, qos: int = 0, callback=None, priority: int = 0):
         """
@@ -213,51 +285,31 @@ class Client(PahoClient):
 
     def _create_shared_ack_callback(self, ack_topic_str: str):
         def shared_ack_callback(message: Message):
-            now = _now_ts()
-            cmd_ack_logger.info(
-                "[RECV-ACK] %s | Ack callback fired on topic=%s, payload_type=%s",
-                now, message.topic, type(message.payload).__name__
-            )
-
             ack_payload = message.payload
-
             if not isinstance(ack_payload, Ack):
                 cmd_ack_logger.warning(
-                    "[RECV-ACK] %s | Payload is NOT an Ack instance (got %s), ignoring",
-                    now, type(ack_payload).__name__
+                    "[RECV-ACK] %s | payload on %s is %s, not an Ack — ignoring",
+                    _now_ts(), ack_topic_str, type(ack_payload).__name__
                 )
                 return
 
             correlation_id = ack_payload.correlation_id
-            performed_at_str = _ts(ack_payload.performed_at) if ack_payload.performed_at else "None"
             cmd_ack_logger.info(
-                "[RECV-ACK] %s | correlation_id=%s, result_code=%s, performed_at=%s, message='%s'",
-                now, correlation_id, ack_payload.result_code, performed_at_str, ack_payload.message
+                "[RECV-ACK] %s | correlation_id=%s, result_code=%s, message='%s'",
+                _now_ts(), correlation_id, ack_payload.result_code, ack_payload.message
             )
 
             with self._pending_commands_lock:
-                pending_ids = list(self._pending_commands.keys())
-                if correlation_id not in self._pending_commands:
+                pending = self._pending_commands.get(correlation_id)
+                if pending is None:
                     cmd_ack_logger.warning(
-                        "[RECV-ACK] %s | correlation_id=%s NOT FOUND in pending_commands (pending: %s), ignoring",
-                        now, correlation_id, pending_ids
+                        "[RECV-ACK] %s | correlation_id=%s not pending (have %s) — ignoring",
+                        _now_ts(), correlation_id, list(self._pending_commands)
                     )
                     return
-
-                event, ack_result, handshake_received = self._pending_commands[correlation_id]
-
-                if ack_payload.result_code == -1:
-                    handshake_received[0] = True
-                    cmd_ack_logger.info(
-                        "[RECV-ACK] %s | HANDSHAKE received for correlation_id=%s", now, correlation_id
-                    )
-                else:
-                    ack_result[0] = ack_payload
-                    cmd_ack_logger.info(
-                        "[RECV-ACK] %s | FINAL ACK received for correlation_id=%s, result_code=%s, setting event",
-                        now, correlation_id, ack_payload.result_code
-                    )
-                    event.set()
+                event, ack_result = pending
+                ack_result[0] = ack_payload
+                event.set()
 
         return shared_ack_callback
 
@@ -267,15 +319,13 @@ class Client(PahoClient):
         command: Any,
         validity_duration: float,
         qos: int = 1,
-        max_command_duration: float = 300.0
     ) -> Ack:
-        """Publish a command and wait for a two-phase acknowledgement.
+        """Publish a command and wait for its acknowledgement.
 
-        1. Subscribe to the ack topic
-        2. Publish the command
-        3. Wait for handshake (result_code=-1)
-        4. Wait for final ack (result_code>=0)
-        5. Return Ack or raise TimeoutError
+        One command, one ack: subscribe to the ack topic, publish, wait for the
+        `Ack` carrying this correlation id, return it. The ack's `result_code`
+        is the broker's own vocabulary — 200 done, 409 conflict, 422 invalid,
+        498 expired, 500 internal.
         """
         if not issubclass(topic.payload_type, Cmd):
             raise ValueError(f"Topic payload type must be Cmd or a subclass of Cmd, got {topic.payload_type}")
@@ -285,37 +335,25 @@ class Client(PahoClient):
         expires_at = created_at + validity_duration
 
         cmd_ack_logger.info(
-            "[SEND-CMD] %s | BEGIN publish_command | correlation_id=%s, cmd_topic=%s, payload_type=%s",
-            _now_ts(), correlation_id, topic, topic.payload_type.__name__
-        )
-        cmd_ack_logger.info(
-            "[SEND-CMD] %s | Timing | created_at=%s, expires_at=%s, validity=%.3fs, max_cmd_duration=%.3fs",
-            _now_ts(), _ts(created_at), _ts(expires_at), validity_duration, max_command_duration
+            "[SEND-CMD] %s | correlation_id=%s, cmd_topic=%s, expires_at=%s",
+            _now_ts(), correlation_id, topic, _ts(expires_at)
         )
 
-        command_dict = {
-            "created_at": created_at,
-            "correlation_id": correlation_id,
-            "expires_at": expires_at,
-            "command": command,
-        }
-        command = topic.payload_type(**command_dict)
+        command = topic.payload_type(
+            created_at=created_at,
+            correlation_id=correlation_id,
+            expires_at=expires_at,
+            command=command,
+        )
 
         ack_topic = topic.to_ack_topic()
         ack_topic_str = str(ack_topic)
 
-        cmd_ack_logger.info("[SEND-CMD] %s | Ack topic resolved: %s", _now_ts(), ack_topic_str)
-
         event = threading.Event()
-        ack_result = [None]
-        handshake_received = [False]
+        ack_result: list = [None]
 
         with self._pending_commands_lock:
-            self._pending_commands[correlation_id] = (event, ack_result, handshake_received)
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | Registered pending command | correlation_id=%s, total_pending=%d",
-                _now_ts(), correlation_id, len(self._pending_commands)
-            )
+            self._pending_commands[correlation_id] = (event, ack_result)
 
         needs_subscription = False
         with self._ack_topic_subscriptions_lock:
@@ -324,191 +362,68 @@ class Client(PahoClient):
                 needs_subscription = True
             self._ack_topic_subscriptions[ack_topic_str].add(correlation_id)
 
-        subscription_confirmed = threading.Event()
-        original_on_subscribe = self.on_subscribe
-
-        def on_subscribe_wrapper(client, userdata, mid, granted_qos, properties=None):
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | SUBACK received | mid=%s, granted_qos=%s, ack_topic=%s",
-                _now_ts(), mid, granted_qos, ack_topic_str
-            )
-            subscription_confirmed.set()
-            if original_on_subscribe:
-                original_on_subscribe(client, userdata, mid, granted_qos, properties)
-
         if needs_subscription:
-            self.on_subscribe = on_subscribe_wrapper
-            shared_callback = self._create_shared_ack_callback(ack_topic_str)
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | Subscribing to ack_topic=%s (new subscription)", _now_ts(), ack_topic_str
-            )
-            result = self.subscribe(ack_topic, qos=qos, callback=shared_callback)
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | subscribe() returned=%s, waiting for SUBACK...", _now_ts(), result
-            )
-
-            if not subscription_confirmed.wait(timeout=1.0):
-                cmd_ack_logger.warning(
-                    "[SEND-CMD] %s | SUBACK TIMEOUT (1s) for ack_topic=%s, proceeding anyway",
-                    _now_ts(), ack_topic_str
-                )
-            else:
-                cmd_ack_logger.info(
-                    "[SEND-CMD] %s | SUBACK confirmed for ack_topic=%s", _now_ts(), ack_topic_str
-                )
-            self.on_subscribe = original_on_subscribe
-        else:
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | Already subscribed to ack_topic=%s, reusing", _now_ts(), ack_topic_str
-            )
-
-        time.sleep(0.05)
-        cmd_ack_logger.info("[SEND-CMD] %s | Post-subscribe settle (50ms) done", _now_ts())
+            self._subscribe_and_wait(ack_topic, qos, self._create_shared_ack_callback(ack_topic_str))
 
         try:
             self.publish(topic, command, qos=qos)
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | Command PUBLISHED to %s (qos=%d) | correlation_id=%s",
-                _now_ts(), topic, qos, correlation_id
-            )
 
-            initial_timeout = expires_at - time.time()
-            if initial_timeout <= 0:
+            timeout = expires_at - time.time()
+            if timeout <= 0 or not event.wait(timeout=max(timeout, 0)):
                 cmd_ack_logger.error(
-                    "[SEND-CMD] %s | EXPIRED before wait loop | expires_at=%s, now=%s, diff=%.6fs",
-                    _now_ts(), _ts(expires_at), _now_ts(), initial_timeout
+                    "[SEND-CMD] %s | no ack for correlation_id=%s before expiry at %s",
+                    _now_ts(), correlation_id, _ts(expires_at)
                 )
                 raise TimeoutError(
-                    f"Command expired before waiting (expires_at={expires_at}, now={time.time()})"
+                    f"command {correlation_id} on {topic} expired without an ack "
+                    f"(expires_at={expires_at}, now={time.time()})"
                 )
 
-            cmd_ack_logger.info(
-                "[SEND-CMD] %s | Entering wait loop | remaining=%.3fs until expiry at %s",
-                _now_ts(), initial_timeout, _ts(expires_at)
-            )
-
-            while True:
-                current_time = time.time()
-                remaining_initial = expires_at - current_time
-
-                if remaining_initial <= 0:
-                    current_time = time.time()
-                    if handshake_received[0]:
-                        elapsed_time = current_time - created_at
-                        remaining_time = max_command_duration - elapsed_time
-                        cmd_ack_logger.info(
-                            "[SEND-CMD] %s | Validity expired but HANDSHAKE was received | elapsed=%.3fs, extended_remaining=%.3fs",
-                            _now_ts(), elapsed_time, remaining_time
-                        )
-                        if remaining_time > 0:
-                            if not event.wait(timeout=remaining_time):
-                                cmd_ack_logger.error(
-                                    "[SEND-CMD] %s | EXTENDED TIMEOUT | No final ACK within max_command_duration=%.3fs | correlation_id=%s",
-                                    _now_ts(), max_command_duration, correlation_id
-                                )
-                                return Ack(
-                                    correlation_id=correlation_id,
-                                    performed_at=None,
-                                    result_code=500,
-                                    message="No response received within max_command_duration"
-                                )
-                        else:
-                            cmd_ack_logger.error(
-                                "[SEND-CMD] %s | EXTENDED TIMEOUT (no remaining) | correlation_id=%s",
-                                _now_ts(), correlation_id
-                            )
-                            return Ack(
-                                correlation_id=correlation_id,
-                                performed_at=None,
-                                result_code=500,
-                                message="No response received within max_command_duration"
-                            )
-                    else:
-                        cmd_ack_logger.error(
-                            "[SEND-CMD] %s | TIMEOUT - NO HANDSHAKE | correlation_id=%s, expires_at=%s, now=%s",
-                            _now_ts(), correlation_id, _ts(expires_at), _ts(current_time)
-                        )
-                        raise TimeoutError(
-                            f"Command expired while waiting for ACK at {ack_topic} "
-                            f"with correlation_id={correlation_id} (expires_at={expires_at}, now={current_time})"
-                        )
-
-                wait_timeout = min(remaining_initial, 0.1)
-                if event.wait(timeout=wait_timeout):
-                    cmd_ack_logger.info(
-                        "[SEND-CMD] %s | Event SET (final ACK) | correlation_id=%s", _now_ts(), correlation_id
-                    )
-                    break
-
-                if handshake_received[0]:
-                    elapsed_time = time.time() - created_at
-                    remaining_time = max_command_duration - elapsed_time
-                    cmd_ack_logger.info(
-                        "[SEND-CMD] %s | Handshake detected in poll loop | elapsed=%.3fs, extended_remaining=%.3fs | correlation_id=%s",
-                        _now_ts(), elapsed_time, remaining_time, correlation_id
-                    )
-                    if remaining_time > 0:
-                        if not event.wait(timeout=remaining_time):
-                            cmd_ack_logger.error(
-                                "[SEND-CMD] %s | EXTENDED TIMEOUT after handshake | correlation_id=%s",
-                                _now_ts(), correlation_id
-                            )
-                            return Ack(
-                                correlation_id=correlation_id,
-                                performed_at=None,
-                                result_code=500,
-                                message="No response received within max_command_duration"
-                            )
-                    else:
-                        cmd_ack_logger.error(
-                            "[SEND-CMD] %s | EXTENDED TIMEOUT (no remaining) after handshake | correlation_id=%s",
-                            _now_ts(), correlation_id
-                        )
-                        return Ack(
-                            correlation_id=correlation_id,
-                            performed_at=None,
-                            result_code=500,
-                            message="No response received within max_command_duration"
-                        )
-                    break
-
-            if ack_result[0] is None:
-                cmd_ack_logger.error(
-                    "[SEND-CMD] %s | BUG: event was set but ack_result is None | correlation_id=%s",
-                    _now_ts(), correlation_id
-                )
-                raise TimeoutError(f"No ACK received for correlation_id={correlation_id}")
-
+            ack = ack_result[0]
             cmd_ack_logger.info(
                 "[SEND-CMD] %s | COMPLETE | correlation_id=%s, result_code=%s, message='%s'",
-                _now_ts(), correlation_id, ack_result[0].result_code, ack_result[0].message
+                _now_ts(), correlation_id, ack.result_code, ack.message
             )
-            return ack_result[0]
+            return ack
         finally:
-            with self._pending_commands_lock:
-                if correlation_id in self._pending_commands:
-                    del self._pending_commands[correlation_id]
-                remaining_pending = len(self._pending_commands)
+            self._release_pending(correlation_id, ack_topic, ack_topic_str)
 
-            should_unsub = False
-            with self._ack_topic_subscriptions_lock:
-                if ack_topic_str in self._ack_topic_subscriptions:
-                    self._ack_topic_subscriptions[ack_topic_str].discard(correlation_id)
-                    if not self._ack_topic_subscriptions[ack_topic_str]:
-                        del self._ack_topic_subscriptions[ack_topic_str]
-                        should_unsub = True
+    def _subscribe_and_wait(self, ack_topic: Topic, qos: int, callback, timeout: float = 1.0):
+        """Subscribe and block until the SUBACK, so no ack can be missed."""
+        confirmed = threading.Event()
+        original_on_subscribe = self.on_subscribe
 
-            if should_unsub:
-                self.unsubscribe(ack_topic)
-                cmd_ack_logger.info(
-                    "[SEND-CMD] %s | UNSUBSCRIBED from ack_topic=%s (no more pending) | correlation_id=%s",
-                    _now_ts(), ack_topic_str, correlation_id
+        def on_subscribe_wrapper(client, userdata, mid, reason_code_list, properties):
+            confirmed.set()
+            if original_on_subscribe:
+                original_on_subscribe(client, userdata, mid, reason_code_list, properties)
+
+        self.on_subscribe = on_subscribe_wrapper
+        try:
+            self.subscribe(ack_topic, qos=qos, callback=callback)
+            if not confirmed.wait(timeout=timeout):
+                cmd_ack_logger.warning(
+                    "[SEND-CMD] %s | no SUBACK for %s within %.1fs — proceeding",
+                    _now_ts(), ack_topic, timeout
                 )
-            else:
-                cmd_ack_logger.info(
-                    "[SEND-CMD] %s | Cleanup done | correlation_id=%s, remaining_pending=%d",
-                    _now_ts(), correlation_id, remaining_pending
-                )
+        finally:
+            self.on_subscribe = original_on_subscribe
+
+    def _release_pending(self, correlation_id: str, ack_topic: Topic, ack_topic_str: str) -> None:
+        with self._pending_commands_lock:
+            self._pending_commands.pop(correlation_id, None)
+
+        should_unsub = False
+        with self._ack_topic_subscriptions_lock:
+            waiters = self._ack_topic_subscriptions.get(ack_topic_str)
+            if waiters is not None:
+                waiters.discard(correlation_id)
+                if not waiters:
+                    del self._ack_topic_subscriptions[ack_topic_str]
+                    should_unsub = True
+
+        if should_unsub:
+            self.unsubscribe(ack_topic)
 
     def _command_worker(self, topic_str: str, q: queue.Queue):
         """Drain a per-topic command queue sequentially. Runs as a daemon thread."""
@@ -518,26 +433,18 @@ class Client(PahoClient):
                 break
             callback, message = item
             correlation_id = getattr(getattr(message, 'payload', None), 'correlation_id', '?')
-            cmd_ack_logger.info(
-                "[CMD-QUEUE] %s | START executing command | topic=%s, correlation_id=%s",
-                _now_ts(), topic_str, correlation_id
-            )
             try:
                 callback(message)
             except Exception as e:
                 cmd_ack_logger.error(
-                    "[CMD-QUEUE] %s | Exception in command worker | topic=%s, correlation_id=%s, error=%s",
+                    "[CMD-QUEUE] %s | exception in command worker | topic=%s, correlation_id=%s, error=%s",
                     _now_ts(), topic_str, correlation_id, e, exc_info=True
                 )
             finally:
-                cmd_ack_logger.info(
-                    "[CMD-QUEUE] %s | DONE executing command | topic=%s, correlation_id=%s, queue_depth=%d",
-                    _now_ts(), topic_str, correlation_id, q.qsize()
-                )
                 q.task_done()
 
     def _enqueue_command(self, topic_str: str, command_callback, message: Message):
-        """Enqueue a command for off-thread execution. Creates a worker thread per topic on first use."""
+        """Enqueue a command for off-thread execution. One worker thread per topic."""
         with self._command_executors_lock:
             if topic_str not in self._command_queues:
                 q = queue.Queue()
@@ -545,164 +452,93 @@ class Client(PahoClient):
                 t = threading.Thread(target=self._command_worker, args=(topic_str, q), daemon=True)
                 t.start()
                 self._command_executors[topic_str] = t
-                cmd_ack_logger.info(
-                    "[CMD-QUEUE] %s | Created command worker thread for topic=%s", _now_ts(), topic_str
-                )
             q = self._command_queues[topic_str]
         q.put((command_callback, message))
-        correlation_id = getattr(getattr(message, 'payload', None), 'correlation_id', '?')
-        cmd_ack_logger.info(
-            "[CMD-QUEUE] %s | Enqueued command | topic=%s, correlation_id=%s, queue_depth=%d",
-            _now_ts(), topic_str, correlation_id, q.qsize()
-        )
 
     def subscribe_to_command(
         self,
         topic: Topic,
         callback: Callable,
-        qos: int = 0
+        qos: int = 1
     ):
-        """Subscribe to a command topic and handle incoming commands with two-phase ack.
+        """Subscribe to a command topic and answer each command with one ack.
 
-        The callback receives a ``Message`` and should return:
-        - ``None`` for success (200)
-        - An ``int`` result code
-        - A ``(int, str)`` tuple of (result_code, message)
-
-        Commands are executed sequentially per topic via an internal queue.
+        The callback receives a ``Message`` and returns either ``None`` (200),
+        an ``int`` result code, or a ``(code, message)`` tuple. An expired
+        command is acked 498 without running the callback; an exception becomes
+        500. Commands for the same topic execute sequentially.
         """
         if not issubclass(topic.payload_type, Cmd):
             raise ValueError(f"Topic payload type must be Cmd or a subclass of Cmd, got {topic.payload_type}")
 
-        cmd_ack_logger.info(
-            "[RECV-CMD] %s | subscribe_to_command called | cmd_topic=%s, payload_type=%s, qos=%d",
-            _now_ts(), topic, topic.payload_type.__name__, qos
-        )
-
-        def command_callback(message: Message):
-            recv_time = time.time()
-            cmd_payload = message.payload
-            ack_topic = message.topic.to_ack_topic()
-
-            if not isinstance(cmd_payload, Cmd):
-                cmd_ack_logger.warning(
-                    "[RECV-CMD] %s | Received non-Cmd payload (got %s) on topic=%s, ignoring",
-                    _now_ts(), type(cmd_payload).__name__, message.topic
-                )
-                return
-
-            cmd_ack_logger.info(
-                "[RECV-CMD] %s | COMMAND RECEIVED | correlation_id=%s, cmd_topic=%s, ack_topic=%s",
-                _now_ts(), cmd_payload.correlation_id, message.topic, ack_topic
-            )
-            cmd_ack_logger.info(
-                "[RECV-CMD] %s | Timing | created_at=%s, expires_at=%s, received_at=%s, time_to_receive=%.3fs",
-                _now_ts(), _ts(cmd_payload.created_at), _ts(cmd_payload.expires_at),
-                _ts(recv_time), recv_time - cmd_payload.created_at
-            )
-
-            current_time = time.time()
-            if current_time > cmd_payload.expires_at:
-                cmd_ack_logger.error(
-                    "[RECV-CMD] %s | EXPIRED on receiver | correlation_id=%s, expires_at=%s, now=%s, overdue=%.3fs",
-                    _now_ts(), cmd_payload.correlation_id,
-                    _ts(cmd_payload.expires_at), _ts(current_time),
-                    current_time - cmd_payload.expires_at
-                )
-                ack = Ack(
-                    correlation_id=cmd_payload.correlation_id,
-                    performed_at=None,
-                    result_code=500,
-                    message="Command expired before processing"
-                )
-                self.publish(ack_topic, ack, qos=qos)
-                cmd_ack_logger.info(
-                    "[RECV-CMD] %s | Sent EXPIRED ACK (500) | correlation_id=%s, ack_topic=%s",
-                    _now_ts(), cmd_payload.correlation_id, ack_topic
-                )
-            else:
-                remaining = cmd_payload.expires_at - current_time
-                cmd_ack_logger.info(
-                    "[RECV-CMD] %s | Command still valid (%.3fs remaining) | correlation_id=%s",
-                    _now_ts(), remaining, cmd_payload.correlation_id
-                )
-
-                handshake_ack = Ack(
-                    correlation_id=cmd_payload.correlation_id,
-                    performed_at=None,
-                    result_code=-1,
-                    message=""
-                )
-                cmd_ack_logger.info(
-                    "[RECV-CMD] %s | PUBLISHING HANDSHAKE (-1) | correlation_id=%s, ack_topic=%s",
-                    _now_ts(), cmd_payload.correlation_id, ack_topic
-                )
-                self.publish(ack_topic, handshake_ack, qos=qos)
-                cmd_ack_logger.info(
-                    "[RECV-CMD] %s | Handshake published, invoking user callback | correlation_id=%s",
-                    _now_ts(), cmd_payload.correlation_id
-                )
-
-                try:
-                    callback_start = time.time()
-                    result = callback(message)
-                    callback_end = time.time()
-
-                    cmd_ack_logger.info(
-                        "[RECV-CMD] %s | User callback returned | correlation_id=%s, result=%s, duration=%.3fs",
-                        _now_ts(), cmd_payload.correlation_id, result, callback_end - callback_start
-                    )
-
-                    if result is None:
-                        result_code = 200
-                        message_text = ""
-                    elif isinstance(result, tuple) and len(result) == 2:
-                        result_code, message_text = result
-                    elif isinstance(result, int):
-                        result_code = result
-                        message_text = ""
-                    else:
-                        result_code = 200
-                        message_text = ""
-
-                    performed_at = datetime.datetime.now(datetime.timezone.utc).timestamp()
-                    ack = Ack(
-                        correlation_id=cmd_payload.correlation_id,
-                        performed_at=performed_at,
-                        result_code=result_code,
-                        message=message_text
-                    )
-                except Exception as exc:
-                    cmd_ack_logger.error(
-                        "[RECV-CMD] %s | User callback EXCEPTION | correlation_id=%s, error=%s",
-                        _now_ts(), cmd_payload.correlation_id, exc, exc_info=True
-                    )
-                    ack = Ack(
-                        correlation_id=cmd_payload.correlation_id,
-                        performed_at=None,
-                        result_code=598,
-                        message=f"Error processing command: {exc}"
-                    )
-
-                cmd_ack_logger.info(
-                    "[RECV-CMD] %s | PUBLISHING FINAL ACK | correlation_id=%s, result_code=%s, message='%s', ack_topic=%s",
-                    _now_ts(), cmd_payload.correlation_id, ack.result_code, ack.message, ack_topic
-                )
-                self.publish(ack_topic, ack, qos=qos)
-                cmd_ack_logger.info(
-                    "[RECV-CMD] %s | Final ACK published | correlation_id=%s",
-                    _now_ts(), cmd_payload.correlation_id
-                )
-
+        command_callback = self.make_command_handler(callback, qos)
         topic_str = str(topic)
 
         def dispatch_callback(message: Message):
             self._enqueue_command(topic_str, command_callback, message)
 
         self.subscribe(topic, qos=qos, callback=dispatch_callback)
-        cmd_ack_logger.info(
-            "[RECV-CMD] %s | Subscribed to cmd_topic=%s (non-blocking dispatch)", _now_ts(), topic
+        cmd_ack_logger.info("[RECV-CMD] %s | subscribed to cmd_topic=%s", _now_ts(), topic)
+
+    def make_command_handler(self, callback: Callable, qos: int = 1) -> Callable[[Message], None]:
+        """Wrap a user callback into the handler that answers one command with one ack.
+
+        Exposed separately from :meth:`subscribe_to_command` so the ack rules —
+        expiry, result-code mapping, exceptions — can be exercised without a
+        broker, and so a caller with its own dispatch can reuse them.
+        """
+        def command_callback(message: Message) -> None:
+            cmd_payload = message.payload
+            ack_topic = message.topic.to_ack_topic()
+
+            if not isinstance(cmd_payload, Cmd):
+                cmd_ack_logger.warning(
+                    "[RECV-CMD] %s | payload on %s is %s, not a Cmd — ignoring",
+                    _now_ts(), message.topic, type(cmd_payload).__name__
+                )
+                return
+
+            if time.time() > cmd_payload.expires_at:
+                cmd_ack_logger.error(
+                    "[RECV-CMD] %s | EXPIRED | correlation_id=%s, expires_at=%s",
+                    _now_ts(), cmd_payload.correlation_id, _ts(cmd_payload.expires_at)
+                )
+                self._ack(ack_topic, cmd_payload.correlation_id, 498, "command expired before execution", qos)
+                return
+
+            try:
+                result = callback(message)
+                if result is None:
+                    code, text = 200, ""
+                elif isinstance(result, tuple) and len(result) == 2:
+                    code, text = result
+                elif isinstance(result, int):
+                    code, text = result, ""
+                else:
+                    code, text = 200, ""
+            except Exception as exc:
+                cmd_ack_logger.error(
+                    "[RECV-CMD] %s | callback raised | correlation_id=%s, error=%s",
+                    _now_ts(), cmd_payload.correlation_id, exc, exc_info=True
+                )
+                code, text = 500, f"error processing command: {exc}"
+
+            self._ack(ack_topic, cmd_payload.correlation_id, code, text, qos)
+
+        return command_callback
+
+    def _ack(self, ack_topic: Topic, correlation_id: str, result_code: int, message: str, qos: int) -> None:
+        ack = Ack(
+            correlation_id=correlation_id,
+            performed_at=datetime.datetime.now(datetime.timezone.utc).timestamp(),
+            result_code=result_code,
+            message=message,
         )
+        cmd_ack_logger.info(
+            "[RECV-CMD] %s | ACK | correlation_id=%s, result_code=%s, ack_topic=%s",
+            _now_ts(), correlation_id, result_code, ack_topic
+        )
+        self.publish(ack_topic, ack, qos=qos)
 
     # ── Factory / convenience ──────────────────────────────────────────────
 
@@ -714,60 +550,63 @@ class Client(PahoClient):
         on_disconnect: Callable = None,
         last_will: Dict[Topic, Payload] = None,
     ):
-        import ssl
+        """Build a client configured for the broker and connect it.
+
+        Authentication is the pinning model (:mod:`franzmq.pinned_tls`): the
+        identity key named by ``MACHINE_KEY`` is the credential, the client
+        presents a certificate minted from it, and the broker decides by
+        looking up that public key among the identities enrolled there. There
+        is no CA, no username/password pair, and no plaintext mode — the client
+        id and the MQTT username are both the identity, so the broker's
+        identity rule and its registry agree with the topics this client
+        publishes.
+
+        | Variable | Meaning |
+        |---|---|
+        | ``MACHINE_KEY`` | path to the ed25519 identity key (required) |
+        | ``NODE_ID`` | identity; defaults to ``client_id`` |
+        | ``MQTT_IP`` / ``MQTT_PORT`` | broker address (default ``broker:1883``) |
+        | ``MQTT_SESSION_EXPIRY`` | seconds the broker keeps the session (default: never expire) |
+        """
         mqtt_ip = config("MQTT_IP", default="broker", cast=str_or_none)
-        mqtt_username = config("MQTT_USERNAME", default="franz", cast=str_or_none)
-        mqtt_password = config("MQTT_PASSWORD", default="franz", cast=str_or_none)
+        mqtt_port = config("MQTT_PORT", default=1883, cast=int)
 
         mqtt_client = Client(client_id=client_id)
         if not mqtt_client.node_id:
             mqtt_client.node_id = client_id
+        identity = mqtt_client.require_node_id()
+        # The broker authenticates the connection by identity; MQTT's username
+        # carries it so the two never disagree.
+        mqtt_client.username_pw_set(identity)
         mqtt_client.configure_mqtt_logger()
         mqtt_client.reconnect_on_failure = True
         mqtt_client.reconnect_on_offline = True
         mqtt_client.reconnect_delay_set(min_delay=1, max_delay=120)
 
-        if mqtt_username and mqtt_password:
-            mqtt_client.username_pw_set(mqtt_username, mqtt_password)
-
-        ca_cert = config("CA_CERT_FILE", default=None, cast=path_or_none)
-        tls_cert = config("TLS_CERT_FILE", default=None, cast=path_or_none)
-        tls_key = config("TLS_KEY_FILE", default=None, cast=path_or_none)
-        use_mqtts = config("USE_MQTTS", default=True, cast=bool)
-
-        if use_mqtts and ca_cert is not None:
-            missing = []
-            for var_name, path in [("CA_CERT_FILE", ca_cert), ("TLS_CERT_FILE", tls_cert), ("TLS_KEY_FILE", tls_key)]:
-                if not path:
-                    missing.append(var_name)
-                elif not path.exists():
-                    raise RuntimeError(f"{var_name} path '{path}' does not exist")
-
-            if missing:
-                raise RuntimeError(f"Missing TLS config env vars: {', '.join(missing)}")
-
-            mqtt_client.tls_set(
-                ca_certs=ca_cert,
-                certfile=tls_cert,
-                keyfile=tls_key,
-                tls_version=ssl.PROTOCOL_TLS_CLIENT
+        key_path = config("MACHINE_KEY", default=None, cast=path_or_none)
+        if key_path is None:
+            raise RuntimeError(
+                "MACHINE_KEY is not set: the identity key is the credential. Generate one "
+                "with colca-keygen and enroll its public key at the node."
             )
-            default_mqtt_port = 8883
-        else:
-            default_mqtt_port = 1883
-
-        mqtt_port = config("MQTT_PORT", default=default_mqtt_port, cast=int)
+        if not key_path.exists():
+            raise RuntimeError(f"MACHINE_KEY path '{key_path}' does not exist")
+        mqtt_client.tls_set_context(self_signed_context(key_path, identity))
 
         if last_will is not None:
             for topic, payload in last_will.items():
                 mqtt_client.will_set(str(topic), payload.encode(), qos=1, retain=True)
 
-        mqtt_client.connect(host=mqtt_ip, port=mqtt_port)
-
         if on_connect is not None:
             mqtt_client.on_connect = on_connect
         if on_disconnect is not None:
             mqtt_client.on_disconnect = on_disconnect
+
+        # A persistent session is what makes commands issued while this client
+        # was away arrive on reconnect instead of being dropped.
+        props = Properties(PacketTypes.CONNECT)
+        props.SessionExpiryInterval = config("MQTT_SESSION_EXPIRY", default=0xFFFFFFFF, cast=int)
+        mqtt_client.connect(host=mqtt_ip, port=mqtt_port, clean_start=False, properties=props)
 
         logger = logging.getLogger(client_id)
         logger.setLevel(logging.INFO)

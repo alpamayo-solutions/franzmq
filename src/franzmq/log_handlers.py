@@ -15,7 +15,7 @@ class MQTTHandler(logging.Handler):
     def emit(self, record: logging.LogRecord):
         try:
             payload = Log(
-                timestamp=datetime.datetime.utcnow().isoformat(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 level=record.levelname,
                 message=self.format(record),
                 logger_name=record.name,
