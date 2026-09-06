@@ -2,6 +2,24 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.6.3] - 2026-09-06
+
+### Fixed
+
+- **A publish from a message callback no longer deadlocks a publisher waiting
+  for its PUBACK.** QoS ≥ 1 publishes were serialized by a lock held across the
+  PUBACK wait, which put *every* publisher behind the waiter — including one
+  inside a message callback, which runs on a thread the network thread joins.
+  The callback blocked on the lock, the network thread on the callback, and the
+  waiter's PUBACK on the network thread, until the timeout. The in-order,
+  one-at-a-time guarantee now comes from paho's own in-flight window
+  (`max_inflight_messages_set(1)`: a second publish is queued inside paho, not
+  on the wire, until the first is acked), each waiter has its own slot keyed by
+  mid, and a PUBACK that arrives before the mid is registered is kept for it.
+- **A waiting publish on a callback thread is sent without waiting**, the way
+  one on the network thread already was: the network thread is joined on that
+  callback, so it cannot read the PUBACK either.
+
 ## [0.6.2] - 2026-08-17
 
 ### Fixed

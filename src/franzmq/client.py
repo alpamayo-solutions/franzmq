@@ -2,6 +2,7 @@ import datetime
 import logging
 import queue
 import threading
+from collections import OrderedDict
 import time
 import uuid
 import pathlib
@@ -54,14 +55,20 @@ DEFAULT_PUBLISH_TIMEOUT = 10.0
 
 
 class _Inflight:
-    """The single QoS≥1 publish currently awaiting its PUBACK."""
+    """One QoS≥1 publish awaiting its PUBACK, keyed by its mid."""
 
-    __slots__ = ("event", "mid", "reason_code")
+    __slots__ = ("event", "reason_code")
 
     def __init__(self) -> None:
         self.event = threading.Event()
-        self.mid: Optional[int] = None
         self.reason_code: int = 0
+
+
+#: PUBACKs that arrived before the publishing thread had registered the mid
+#: they answer. The window is the few instructions between paho sending the
+#: packet and `_publish_bytes` storing its slot, so a handful suffice; the
+#: bound only keeps a lost registration from growing the dict forever.
+_EARLY_ACK_LIMIT = 64
 
 
 class Client(PahoClient):
@@ -82,14 +89,29 @@ class Client(PahoClient):
         self.node_id: Optional[str] = config("NODE_ID", default=None, cast=str_or_none)
 
         self.publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT
-        # One QoS≥1 publish in flight at a time. Unbounded in-flight QoS-1 is
-        # not just a throughput knob: an ordinary reconnect replays whatever is
-        # still unacked from paho's message store, out of order, after newer
-        # messages are already on the wire. Serializing on PUBACK removes that
-        # race, and it is also what makes a reason code attributable to the
-        # message that earned it.
-        self._publish_lock = threading.Lock()
-        self._inflight: Optional[_Inflight] = None
+        # One QoS≥1 publish on the wire at a time, in order. Unbounded
+        # in-flight QoS-1 is not just a throughput knob: an ordinary reconnect
+        # replays whatever is still unacked from paho's message store, out of
+        # order, after newer messages are already on the wire. paho's own
+        # in-flight window closes that race without blocking anyone: a second
+        # QoS≥1 publish is queued inside paho and sent once the first is
+        # acked. It used to be a lock held across the PUBACK wait instead,
+        # which put EVERY publisher behind the waiter -- including one inside
+        # a message callback, which runs on a thread the network thread joins.
+        # The callback blocked on the lock, the network thread on the
+        # callback, and the waiter's PUBACK on the network thread: a deadlock
+        # that ended only at the timeout.
+        self.max_inflight_messages_set(1)
+        # Guards the two dicts below and nothing else -- never held across a
+        # wait, never held around a call into paho (whose PUBACK handler runs
+        # under paho's own mutex and calls back into `_do_on_publish`).
+        self._inflight_lock = threading.Lock()
+        self._inflight: dict[int, _Inflight] = {}
+        self._early_acks: "OrderedDict[int, int]" = OrderedDict()
+        # Threads franzmq spawned to run message callbacks. The network thread
+        # joins them, so a PUBACK cannot be read while one of them waits for
+        # it -- the same reason the network thread itself never waits.
+        self._callback_thread = threading.local()
 
         self._on_connect_callbacks = []
         self._on_message_callbacks = []
@@ -150,41 +172,60 @@ class Client(PahoClient):
             # QoS 0 has no PUBACK to wait for and no reason code to report.
             return super().publish(topic, data, qos, retain)
 
-        if wait and threading.current_thread() is self._thread:
-            # Publishing from inside a callback: the PUBACK can only be read by
-            # the network thread, which is the thread now asking to wait for it.
-            # Waiting here deadlocks until the timeout, every time. The publish
-            # still goes out — it just cannot be confirmed from here, so a
-            # caller that needs the broker's verdict must publish off this
-            # thread.
+        if wait and self._cannot_read_the_puback():
+            # Publishing from the network thread, or from a callback thread it
+            # is joining: the PUBACK can only be read by the network thread,
+            # which is the thread now asked to wait for it (or blocked on the
+            # one that is). Waiting here deadlocks until the timeout, every
+            # time. The publish still goes out -- it just cannot be confirmed
+            # from here, so a caller that needs the broker's verdict must
+            # publish off these threads.
             logger.debug(
                 "publish to %s runs on the network thread: sending without waiting for the "
                 "PUBACK (a rejection cannot be reported here)", topic,
             )
             wait = False
 
-        with self._publish_lock:
-            slot = _Inflight()
-            self._inflight = slot
-            try:
-                info = super().publish(topic, data, qos, retain)
-                slot.mid = info.mid
-                if not wait:
-                    return info
-                if not slot.event.wait(self.publish_timeout):
-                    raise PublishTimeout(topic, self.publish_timeout)
-                if slot.reason_code >= 0x80:
-                    raise PublishRejected(slot.reason_code, topic)
-                return info
-            finally:
-                self._inflight = None
+        info = super().publish(topic, data, qos, retain)
+        slot = _Inflight()
+        with self._inflight_lock:
+            early = self._early_acks.pop(info.mid, None)
+            if early is not None:
+                slot.reason_code = early
+                slot.event.set()
+            else:
+                self._inflight[info.mid] = slot
+        if not wait:
+            return info
+        try:
+            if not slot.event.wait(self.publish_timeout):
+                raise PublishTimeout(topic, self.publish_timeout)
+            if slot.reason_code >= 0x80:
+                raise PublishRejected(slot.reason_code, topic)
+            return info
+        finally:
+            with self._inflight_lock:
+                if self._inflight.get(info.mid) is slot:
+                    del self._inflight[info.mid]
+
+    def _cannot_read_the_puback(self) -> bool:
+        return (
+            threading.current_thread() is self._thread
+            or getattr(self._callback_thread, "joined_by_network_thread", False)
+        )
 
     def _do_on_publish(self, mid, reason_code, properties):
         # paho's internal PUBACK hook. Capturing here rather than on the public
         # on_publish callback keeps that callback free for the application.
-        slot = self._inflight
-        if slot is not None and (slot.mid is None or slot.mid == mid):
-            slot.reason_code = int(getattr(reason_code, "value", reason_code) or 0)
+        code = int(getattr(reason_code, "value", reason_code) or 0)
+        with self._inflight_lock:
+            slot = self._inflight.pop(mid, None)
+            if slot is None:
+                self._early_acks[mid] = code
+                while len(self._early_acks) > _EARLY_ACK_LIMIT:
+                    self._early_acks.popitem(last=False)
+        if slot is not None:
+            slot.reason_code = code
             slot.event.set()
         return super()._do_on_publish(mid, reason_code, properties)
 
@@ -281,9 +322,13 @@ class Client(PahoClient):
         """
         Execute callbacks concurrently. Each callback receives a decoded Message.
         """
+        def run(cb):
+            self._callback_thread.joined_by_network_thread = True
+            cb(message)
+
         threads = []
         for cb in callbacks:
-            t = threading.Thread(target=cb, args=(message,))
+            t = threading.Thread(target=run, args=(cb,))
             t.start()
             threads.append(t)
         for t in threads:

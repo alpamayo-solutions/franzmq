@@ -1,10 +1,12 @@
 """Unit tests for publishing: encoding, tombstones, reason codes, ordering."""
+import socket
 import threading
 import time
 from dataclasses import dataclass
 from unittest.mock import patch
 
 import pytest
+import paho.mqtt.client as paho_client
 from paho.mqtt.client import Client as PahoClient, MQTTMessage, MQTTMessageInfo
 from paho.mqtt.reasoncodes import ReasonCode
 
@@ -103,36 +105,126 @@ def test_fire_and_forget_skips_the_wait():
     assert info.mid == 1
 
 
-def test_qos1_publishes_are_serialized():
-    """A second publish must not reach the wire before the first is acked.
+def test_qos1_publishes_go_out_one_at_a_time_and_in_order():
+    """A second QoS-1 publish must not reach the wire before the first is acked.
 
     Unbounded in-flight QoS-1 is what lets a reconnect replay an unacked
-    message after a newer one already went out.
+    message after a newer one already went out. paho's in-flight window is
+    where that is enforced, so this pins it at paho's seam: the second
+    message sits queued inside paho, not on the wire, until the first is
+    acked -- and no publisher was blocked to achieve that.
     """
     client = Client()
-    sent = []
+    # paho queues everything while it has no socket; give it one so the first
+    # message can take the in-flight slot. Nothing is written until a loop runs.
+    ours, theirs = socket.socketpair()
+    client._sock = ours
+    try:
+        first = client.publish(_topic("one"), DummyPayload(), qos=1, wait=False)
+        second = client.publish(_topic("two"), DummyPayload(), qos=1, wait=False)
+        states = {mid: client._out_messages[mid].state for mid in (first.mid, second.mid)}
+    finally:
+        client._sock = None
+        ours.close()
+        theirs.close()
 
-    def fake_publish(topic, *_args, **_kwargs):
-        sent.append(topic)
-        return _Info(mid=len(sent))
+    assert states[first.mid] == paho_client.mqtt_ms_wait_for_puback, states
+    assert states[second.mid] == paho_client.mqtt_ms_queued, "second publish went out before the first was acked"
 
-    with patch.object(PahoClient, "publish", side_effect=fake_publish):
-        first = threading.Thread(target=lambda: client.publish(_topic("one"), DummyPayload(), qos=1))
-        first.start()
+
+def test_a_publish_from_a_message_callback_does_not_wait_behind_a_waiting_publisher():
+    """The deadlock this replaces: thread A waits for its PUBACK; a message
+    arrives; the network thread joins the callback thread; the callback
+    publishes. With a lock held across A's wait the callback blocked on it,
+    the network thread on the callback, and A's PUBACK on the network
+    thread -- until the timeout. Here the main thread plays the callback
+    thread: its publish must return at once, and A's PUBACK, delivered
+    afterwards (as the freed network thread would), must resolve A."""
+    client = Client()
+    client.publish_timeout = 1.0
+    outcome: dict = {}
+
+    def waiter():
+        try:
+            client.publish(_topic("a"), DummyPayload(), qos=1)
+            outcome["ok"] = True
+        except PublishTimeout as exc:
+            outcome["error"] = exc
+
+    with patch.object(PahoClient, "publish", side_effect=[_Info(mid=1), _Info(mid=2)]):
+        a = threading.Thread(target=waiter)
+        a.start()
         time.sleep(0.05)
-        second = threading.Thread(target=lambda: client.publish(_topic("two"), DummyPayload(), qos=1))
-        second.start()
-        time.sleep(0.05)
 
-        assert sent == [str(_topic("one"))], "second publish went out before the first was acked"
+        start = time.monotonic()
+        client.publish(_topic("cb"), DummyPayload(), qos=1, wait=False)
+        assert time.monotonic() - start < 0.2, "the callback's publish queued behind the waiter"
+
         _ack(client, 1)
-        first.join(timeout=1)
-        time.sleep(0.05)
-        assert sent == [str(_topic("one")), str(_topic("two"))]
-        _ack(client, 2)
-        second.join(timeout=1)
+        a.join(timeout=1)
 
-    assert not first.is_alive() and not second.is_alive()
+    assert outcome == {"ok": True}, outcome
+
+
+def test_a_waiting_publish_on_a_callback_thread_is_sent_without_waiting():
+    """A callback thread is joined by the network thread, so a PUBACK cannot
+    be read while it waits -- franzmq sends and returns instead of timing out."""
+    client = Client()
+    client.publish_timeout = 1.0
+    elapsed: dict = {}
+
+    def callback(_message):
+        start = time.monotonic()
+        client.publish(_topic("cb"), DummyPayload(), qos=1)  # wait=True, and no ack ever comes
+        elapsed["s"] = time.monotonic() - start
+
+    with patch.object(PahoClient, "publish", return_value=_Info(mid=7)):
+        client._execute_callbacks_concurrently(object(), [callback])
+
+    assert elapsed["s"] < 0.5, f"a callback-thread publish waited {elapsed['s']:.2f}s for a PUBACK it cannot read"
+
+
+def test_a_puback_that_beats_the_registration_still_resolves_the_waiter():
+    """paho may send and the broker answer before `publish()` has returned the
+    mid to the caller; that ack must not be lost to the waiter."""
+    client = Client()
+    client.publish_timeout = 0.5
+
+    def publish_and_ack_first(*_args, **_kwargs):
+        _ack(client, 3)
+        return _Info(mid=3)
+
+    with patch.object(PahoClient, "publish", side_effect=publish_and_ack_first):
+        start = time.monotonic()
+        client.publish(_topic(), DummyPayload(value=1), qos=1)
+    assert time.monotonic() - start < 0.3
+
+
+def test_a_rejection_is_attributed_to_the_message_that_earned_it():
+    client = Client()
+    client.publish_timeout = 1.0
+    verdicts: dict = {}
+
+    def publisher(name):
+        try:
+            client.publish(_topic(name), DummyPayload(), qos=1)
+            verdicts[name] = "ok"
+        except PublishRejected as exc:
+            verdicts[name] = exc.reason_code
+
+    with patch.object(PahoClient, "publish", side_effect=[_Info(mid=1), _Info(mid=2)]):
+        one = threading.Thread(target=publisher, args=("one",))
+        one.start()
+        time.sleep(0.05)
+        two = threading.Thread(target=publisher, args=("two",))
+        two.start()
+        time.sleep(0.05)
+        _ack(client, 2, value=0x87)  # NotAuthorized, for the SECOND message
+        _ack(client, 1)
+        one.join(timeout=1)
+        two.join(timeout=1)
+
+    assert verdicts == {"one": "ok", "two": 0x87}
 
 
 def test_a_tombstone_decodes_to_none():
