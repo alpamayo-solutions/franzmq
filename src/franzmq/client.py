@@ -335,17 +335,11 @@ class Client(PahoClient):
             t.join()
 
     def _handle_on_message(self, message):
-        topic = Topic.from_str(message.topic)
-        message = Message(
-            topic=topic,
-            payload=topic.payload_type.decode(message.payload, message.timestamp),
-            timestamp=message.timestamp,
-            qos=message.qos,
-            retain=message.retain,
-            mid=message.mid
-        )
-
-        return super()._handle_on_message(message)
+        # Every message paho delivers comes through here, so this is where it
+        # is decoded -- by the one decoder, which knows an empty payload is a
+        # tombstone. A second decode here once raised on every tombstone and
+        # took the network thread with it.
+        return super()._handle_on_message(self._decode_message(message))
 
     # ── Command / Acknowledge pattern ──────────────────────────────────────
 

@@ -2,6 +2,18 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.6.4] - 2026-09-19
+
+### Fixed
+
+- **A tombstone reaches a subscription callback as `payload is None`.** 0.6.1
+  taught `_decode_message` that an empty payload retires a record, but every
+  message paho delivers is decoded first in `_handle_on_message`, which still
+  decoded the empty payload as the contract and raised on the network thread.
+  A retained tombstone a node hands a new subscriber therefore killed the
+  subscriber's network thread on every connect. `_handle_on_message` now uses
+  the one decoder.
+
 ## [0.6.3] - 2026-09-06
 
 ### Fixed
