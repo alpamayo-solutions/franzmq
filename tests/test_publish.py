@@ -244,6 +244,34 @@ def test_a_tombstone_decodes_to_none():
     assert str(message.topic) == "example/v1/_DummyPayload/m1/a/b"
 
 
+def test_a_tombstone_reaches_a_subscription_callback_as_none():
+    """The path paho actually delivers through: a retained tombstone a node
+    hands a new subscriber must reach its callback, not kill the network
+    thread in a second decoder."""
+    import threading
+
+    from franzmq.data_contracts import PAYLOAD_CLASSES
+
+    PAYLOAD_CLASSES[DummyPayload.get_identifier()] = DummyPayload
+    client = Client()
+    received = []
+    done = threading.Event()
+    client.subscribe(
+        "example/v1/_DummyPayload/m1/#",
+        callback=lambda message: (received.append(message), done.set()),
+    )
+    raw = MQTTMessage(1)
+    raw.topic = b"example/v1/_DummyPayload/m1/a/b"
+    raw.payload = b""
+    raw.retain = True
+
+    client._handle_on_message(raw)
+
+    assert done.wait(2), "the callback never ran"
+    assert [message.payload for message in received] == [None]
+    assert str(received[0].topic) == "example/v1/_DummyPayload/m1/a/b"
+
+
 def test_publishing_from_the_network_thread_does_not_wait():
     """A blocking publish inside a callback would wait for a PUBACK that only
     the blocked thread can deliver — it deadlocks until the timeout, always."""
