@@ -44,4 +44,4 @@ class Message(PahoMQTTMessage):
     @payload.setter
     def payload(self, value):
         args = value if isinstance(value, dict) else value.__dict__
-        self._payload = self.topic.payload_type(**args)
+        self._payload = self.topic.payload_type.from_dict(args)
