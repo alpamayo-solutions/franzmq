@@ -2,6 +2,24 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [0.6.5] - 2026-09-25
+
+### Fixed
+
+- **Commands and acks from a colca node decode.** `Cmd.created_at` is optional
+  (the node's door does not require it) and `Ack` carries the node's
+  `state_writes`, the records the command wrote. Both failed the typed decode,
+  so every such message reached subscribers undecoded.
+- **A field a contract does not declare no longer fails the decode.** It is kept
+  as an attribute and re-encoded, so a record from a newer writer decodes whole.
+  `Payload.from_dict` is the one constructor the decoders and
+  `Message.payload` use.
+
+### Changed
+
+- `Cmd`'s fields are ordered `correlation_id, expires_at, created_at, command`;
+  construct it by keyword.
+
 ## [0.6.4] - 2026-09-19
 
 ### Fixed

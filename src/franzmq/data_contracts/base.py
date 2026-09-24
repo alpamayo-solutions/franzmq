@@ -3,7 +3,7 @@ import json
 from typing import Any, Optional, Dict, List
 import sys
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 import datetime
 import time
@@ -76,7 +76,22 @@ class Payload(ABC):
     def decode(cls, json_str, timestamp: int):
         data = json.loads(json_str)
         data.pop("version", None)
-        return cls(**data)
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        """Build the payload from a decoded record.
+
+        A field this class does not declare is kept as an attribute instead of
+        failing the decode, so a record from a newer writer still decodes and
+        re-encodes whole.
+        """
+        declared = {f.name for f in fields(cls) if f.init}
+        payload = cls(**{k: v for k, v in data.items() if k in declared})
+        for key, value in data.items():
+            if key not in declared and not hasattr(cls, key):
+                setattr(payload, key, value)
+        return payload
 
     @classmethod
     def get_identifier(cls) -> str:
@@ -115,7 +130,7 @@ class Metric(Payload):
         data = json.loads(json_str)
         if isinstance(data["timestamp"], str):
             data["timestamp"] = datetime.datetime.fromisoformat(data["timestamp"]).timestamp()
-        return cls(**data)
+        return cls.from_dict(data)
 
 
 @dataclass
@@ -133,9 +148,9 @@ class Log(Payload):
 
 @dataclass
 class Cmd(Payload):
-    created_at: float
     correlation_id: str
     expires_at: float
+    created_at: Optional[float] = None
     command: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -152,3 +167,5 @@ class Ack(Payload):
     performed_at: Optional[float] = None
     result_code: int = 200
     message: str = ""
+    # The records the command wrote, each {stream, offset, topic}.
+    state_writes: List[Dict[str, Any]] = field(default_factory=list)
