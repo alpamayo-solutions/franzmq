@@ -2,6 +2,21 @@
 
 All notable changes to franzmq are documented in this file.
 
+## [Unreleased]
+
+### Removed
+
+- **No contract is exempt from the path.** `franzmq.topic.PATHLESS_CONTRACTS`
+  is gone: colca removed the `_TimeSync` contract, the only one whose topic had
+  four segments, so `Topic` now refuses every topic without a path segment
+  (a `#` filter at the node level still parses).
+
+### Changed
+
+- `tests/vectors/topic_transformations.json` is colca's current copy
+  (`colca/…` topics, `_EnrolledIdentity` and `_Resource` cases, the four-segment
+  `_TimeSync` topic as a rejected case).
+
 ## [0.6.5] - 2026-09-25
 
 ### Fixed

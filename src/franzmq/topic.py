@@ -18,18 +18,6 @@ WILDCARDS = {SINGLE_LEVEL_WILDCARD, MULTI_LEVEL_WILDCARD}
 
 Wildcard = Literal['+', '#']
 
-# Contracts whose wire topic carries no hierarchy path at all, i.e. the only
-# ones whose valid form is exactly 4 segments (prefix/version/_Contract/node-id).
-# Every other contract needs at least one path segment.
-#
-# This mirrors the Go door's grammar (colca `plugins/alp.Parse`). The two
-# implementations are bound by the shared golden vectors
-# (`vectors/topic_transformations.json`, shipped by prekit-data-contracts and
-# copied into this repo's tests) — changing this set is a protocol change and
-# needs both suites green.
-PATHLESS_CONTRACTS = frozenset({"_TimeSync"})
-
-
 @dataclass(frozen=True)
 class Topic:
     """Basic topic class. Used for internal communication within an edge node.
@@ -157,19 +145,14 @@ class Topic:
 
         if self.context:
             return
-        # No path: only the pathless contracts and a '#' filter may end here.
+        # No path: only a '#' filter may end here. Every contract needs at least
+        # one path segment (colca `plugins/uns` grammar, bound by the golden
+        # vectors in tests/vectors/topic_transformations.json).
         if self.node_id == MULTI_LEVEL_WILDCARD:
             return
-        contract = (
-            self.payload_type
-            if self.payload_type in WILDCARDS
-            else self.payload_type.get_identifier()
+        raise ValueError(
+            f"Topic {topic!r} has no path. Every contract needs at least one path segment."
         )
-        if contract not in PATHLESS_CONTRACTS:
-            raise ValueError(
-                f"Topic {topic!r} has no path. Only {sorted(PATHLESS_CONTRACTS)} may be "
-                "published without one; every other contract needs at least one path segment."
-            )
 
     @classmethod
     def from_isa95_topic(cls, topic: "Isa95Topic", node_id: str) -> "Topic":

@@ -1,34 +1,36 @@
 {
-  "_comment": "Golden topic-transformation vectors (schema-bundle design §2, tier 2). One dataset judged by BOTH sides of the language boundary: franzmq 0.5.0's Python suite and colca's plugins/alp Go tests. The cases RESTATE shipped colca behavior (plugins/alp/alp.go, colca/README.md normative table) — changing them is a protocol change and needs both suites green.",
-  "scheme": "alp/{version}/_{Contract}/{node-id}/{path...}",
+  "_comment": "Golden topic-transformation vectors. One dataset judged on both sides of the language boundary: franzmq's Python suite and colca's plugins/uns Go tests. The cases restate how colca builds and rewrites topics (plugins/uns/uns.go); changing one is a protocol change and needs both suites green.",
+  "scheme": "colca/{version}/_{Contract}/{node-id}/{path...}",
   "parse": [
-    {"topic": "alp/v1/_Metric/m1/site1/edge1/m1/temp", "ok": true, "prefix": "alp", "version": "v1", "contract": "_Metric", "node_id": "m1", "path": "site1/edge1/m1/temp"},
-    {"topic": "alp/v1/_Metric/m1/temp", "ok": true, "prefix": "alp", "version": "v1", "contract": "_Metric", "node_id": "m1", "path": "temp"},
-    {"topic": "alp/v1/_CmdParam/m1/site1/edge1/m1/set-speed", "ok": true, "prefix": "alp", "version": "v1", "contract": "_CmdParam", "node_id": "m1", "path": "site1/edge1/m1/set-speed"},
-    {"topic": "alp/v1/_Ack/n-edge1/enroll", "ok": true, "prefix": "alp", "version": "v1", "contract": "_Ack", "node_id": "n-edge1", "path": "enroll"},
-    {"topic": "alp/v1/_EdgeNode/n-site1/edge1", "ok": true, "prefix": "alp", "version": "v1", "contract": "_EdgeNode", "node_id": "n-site1", "path": "edge1"},
-    {"topic": "alp/v1/_TimeSync/n-edge1", "ok": true, "prefix": "alp", "version": "v1", "contract": "_TimeSync", "node_id": "n-edge1", "path": ""},
-    {"topic": "alp/v1/_Metric/m1", "ok": false, "why": "4 segments and not _TimeSync — need >=5"},
-    {"topic": "alp/v1/_Metric", "ok": false, "why": "3 segments"},
-    {"topic": "alp/v1/Metric/m1/temp", "ok": false, "why": "level 3 must start with underscore"},
-    {"topic": "alp/v1/_TimeSync/n-edge1/extra", "ok": true, "prefix": "alp", "version": "v1", "contract": "_TimeSync", "node_id": "n-edge1", "path": "extra", "why": "5-segment _TimeSync parses like any contract; the 4-segment form is the special case"}
+    {"topic": "colca/v1/_Metric/m1/site1/edge1/m1/temp", "ok": true, "prefix": "colca", "version": "v1", "contract": "_Metric", "node_id": "m1", "path": "site1/edge1/m1/temp"},
+    {"topic": "colca/v1/_Metric/m1/temp", "ok": true, "prefix": "colca", "version": "v1", "contract": "_Metric", "node_id": "m1", "path": "temp"},
+    {"topic": "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed", "ok": true, "prefix": "colca", "version": "v1", "contract": "_CmdParam", "node_id": "m1", "path": "site1/edge1/m1/set-speed"},
+    {"topic": "colca/v1/_Ack/n-edge1/enroll", "ok": true, "prefix": "colca", "version": "v1", "contract": "_Ack", "node_id": "n-edge1", "path": "enroll"},
+    {"topic": "colca/v1/_EnrolledIdentity/n-site1/_colca/identities/edge1", "ok": true, "prefix": "colca", "version": "v1", "contract": "_EnrolledIdentity", "node_id": "n-site1", "path": "_colca/identities/edge1"},
+    {"topic": "colca/v1/_TimeSync/n-edge1", "ok": false, "why": "4 segments: no contract is exempt from the path, and _TimeSync is not a contract"},
+    {"topic": "colca/v1/_Metric/m1", "ok": false, "why": "4 segments — need >=5"},
+    {"topic": "colca/v1/_Metric", "ok": false, "why": "3 segments"},
+    {"topic": "colca/v1/Metric/m1/temp", "ok": false, "why": "level 3 must start with underscore"},
+    {"topic": "colca/v1/_Resource/n-edge1/production/line1/press3/01H4RESOURCE0000000000001", "ok": true, "prefix": "colca", "version": "v1", "contract": "_Resource", "node_id": "n-edge1", "path": "production/line1/press3/01H4RESOURCE0000000000001"}
   ],
   "mount_insert": [
-    {"topic": "alp/v1/_Metric/m1/m1/temp", "mount": "edge1", "out": "alp/v1/_Metric/m1/edge1/m1/temp"},
-    {"topic": "alp/v1/_Metric/m1/edge1/m1/temp", "mount": "site1", "out": "alp/v1/_Metric/m1/site1/edge1/m1/temp"},
-    {"topic": "alp/v1/_Ack/n-edge1/enroll", "mount": "edge1", "out": "alp/v1/_Ack/n-edge1/edge1/enroll"},
-    {"topic": "alp/v1/_Metric/m1", "mount": "edge1", "out": "alp/v1/_Metric/m1", "why": "fewer than 5 segments: unchanged"}
+    {"topic": "colca/v1/_Metric/m1/m1/temp", "mount": "edge1", "out": "colca/v1/_Metric/m1/edge1/m1/temp"},
+    {"topic": "colca/v1/_Metric/m1/edge1/m1/temp", "mount": "site1", "out": "colca/v1/_Metric/m1/site1/edge1/m1/temp"},
+    {"topic": "colca/v1/_Ack/n-edge1/enroll", "mount": "edge1", "out": "colca/v1/_Ack/n-edge1/edge1/enroll"},
+    {"topic": "colca/v1/_Metric/m1", "mount": "edge1", "out": "colca/v1/_Metric/m1", "why": "fewer than 5 segments: unchanged"},
+    {"topic": "colca/v1/_Resource/n-edge1/press3/01H4RESOURCE0000000000001", "mount": "site1/edge1", "out": "colca/v1/_Resource/n-edge1/site1/edge1/press3/01H4RESOURCE0000000000001"}
   ],
   "mount_strip": [
-    {"topic": "alp/v1/_CmdParam/m1/edge1/m1/go", "mount": "edge1", "ok": true, "out": "alp/v1/_CmdParam/m1/m1/go"},
-    {"topic": "alp/v1/_CmdAdmin/n-edge1/edge1/enroll", "mount": "edge1", "ok": true, "out": "alp/v1/_CmdAdmin/n-edge1/enroll"},
-    {"topic": "alp/v1/_CmdParam/m1/other/m1/go", "mount": "edge1", "ok": false, "why": "path does not start with the mount — foreign record, never delivered"},
-    {"topic": "alp/v1/_CmdParam/m1/edge10/m1/go", "mount": "edge1", "ok": false, "why": "boundary is the path separator: edge10 is not under edge1"},
-    {"topic": "alp/v1/_CmdParam/m1", "mount": "edge1", "ok": false, "why": "fewer than 5 segments"}
+    {"topic": "colca/v1/_CmdParam/m1/edge1/m1/go", "mount": "edge1", "ok": true, "out": "colca/v1/_CmdParam/m1/m1/go"},
+    {"topic": "colca/v1/_CmdAdmin/n-edge1/edge1/enroll", "mount": "edge1", "ok": true, "out": "colca/v1/_CmdAdmin/n-edge1/enroll"},
+    {"topic": "colca/v1/_CmdParam/m1/other/m1/go", "mount": "edge1", "ok": false, "why": "path does not start with the mount — foreign record, never delivered"},
+    {"topic": "colca/v1/_CmdParam/m1/edge10/m1/go", "mount": "edge1", "ok": false, "why": "boundary is the path separator: edge10 is not under edge1"},
+    {"topic": "colca/v1/_CmdParam/m1", "mount": "edge1", "ok": false, "why": "fewer than 5 segments"},
+    {"topic": "colca/v1/_Resource/n-edge1/site1/edge1/press3/01H4RESOURCE0000000000001", "mount": "site1/edge1", "ok": true, "out": "colca/v1/_Resource/n-edge1/press3/01H4RESOURCE0000000000001"}
   ],
   "identity_rule": [
-    {"topic": "alp/v1/_Metric/m1/temp", "authenticated_as": "m1", "ok": true},
-    {"topic": "alp/v1/_Metric/m1/temp", "authenticated_as": "m2", "ok": false, "why": "level-4 must equal the authenticated identity for data/entity/ack"},
-    {"topic": "alp/v1/_CmdParam/m1/m1/go", "authenticated_as": "hmi", "ok": true, "why": "commands are exempt from the identity rule — cmd grants gate them instead"}
+    {"topic": "colca/v1/_Metric/m1/temp", "authenticated_as": "m1", "ok": true},
+    {"topic": "colca/v1/_Metric/m1/temp", "authenticated_as": "m2", "ok": false, "why": "level-4 must equal the authenticated identity for data/entity/ack"},
+    {"topic": "colca/v1/_CmdParam/m1/m1/go", "authenticated_as": "hmi", "ok": true, "why": "commands are exempt from the identity rule — cmd grants gate them instead"}
   ]
 }
