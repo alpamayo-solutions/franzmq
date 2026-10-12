@@ -33,8 +33,7 @@ VECTORS = json.loads(
 
 
 # Contracts the vectors use that are not defined by franzmq itself: they belong
-# to prekit-data-contracts (the CMD classes, entities) or to the broker binary
-# (_TimeSync). franzmq resolves contracts through PAYLOAD_CLASSES, so the test
+# to colca-data-contracts (the CMD classes, entities). franzmq resolves contracts through PAYLOAD_CLASSES, so the test
 # registers stand-ins with the right identifiers — the grammar under test is
 # indifferent to a contract's fields.
 @dataclass
@@ -48,18 +47,18 @@ class CmdAdmin(Cmd):
 
 
 @dataclass
-class EdgeNode(Payload):
+class EnrolledIdentity(Payload):
     id: str = ""
 
 
 @dataclass
-class TimeSync(Payload):
-    now_ms: int = 0
+class Resource(Payload):
+    id: str = ""
 
 
 @pytest.fixture(autouse=True)
 def _register_vector_contracts():
-    added = [CmdParam, CmdAdmin, EdgeNode, TimeSync]
+    added = [CmdParam, CmdAdmin, EnrolledIdentity, Resource]
     for cls in added:
         PAYLOAD_CLASSES[cls.get_identifier()] = cls
     yield
