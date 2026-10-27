@@ -9,7 +9,7 @@ import pathlib
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from decouple import config
-from paho.mqtt.client import Client as PahoClient, CallbackAPIVersion, MQTTv5
+from paho.mqtt.client import Client as PahoClient, CallbackAPIVersion, MQTTv5, mqtt_ms_publish, mqtt_ms_queued
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
@@ -64,6 +64,12 @@ class _Inflight:
         self.reason_code: int = 0
 
 
+#: QoS≥1 publishes on the wire at once. colca's broker accepts 1,024
+#: (its MQTT receive maximum); a node acknowledges each after a synced write,
+#: so a wider window is what lets a publisher go faster than one round trip.
+MAX_INFLIGHT = 64
+
+
 #: PUBACKs that arrived before the publishing thread had registered the mid
 #: they answer. The window is the few instructions between paho sending the
 #: packet and `_publish_bytes` storing its slot, so a handful suffice; the
@@ -89,19 +95,29 @@ class Client(PahoClient):
         self.node_id: Optional[str] = config("NODE_ID", default=None, cast=str_or_none)
 
         self.publish_timeout: float = DEFAULT_PUBLISH_TIMEOUT
-        # One QoS≥1 publish on the wire at a time, in order. Unbounded
-        # in-flight QoS-1 is not just a throughput knob: an ordinary reconnect
-        # replays whatever is still unacked from paho's message store, out of
-        # order, after newer messages are already on the wire. paho's own
-        # in-flight window closes that race without blocking anyone: a second
-        # QoS≥1 publish is queued inside paho and sent once the first is
-        # acked. It used to be a lock held across the PUBACK wait instead,
-        # which put EVERY publisher behind the waiter -- including one inside
-        # a message callback, which runs on a thread the network thread joins.
-        # The callback blocked on the lock, the network thread on the
-        # callback, and the waiter's PUBACK on the network thread: a deadlock
-        # that ended only at the timeout.
-        self.max_inflight_messages_set(1)
+        # Up to MAX_INFLIGHT QoS≥1 publishes on the wire at once, in publish
+        # order. Within a connection paho keeps that order: a publish goes
+        # out at once only while nothing is queued, and a PUBACK sends the
+        # oldest queued one. A reconnect is where paho loses it: it marks
+        # every stored message for resending, but sends them only after
+        # CONNACK, after on_connect ran -- and a publish made meanwhile (by
+        # on_connect, or by another thread) found the window empty and went
+        # out first, ahead of older unacknowledged ones. On a retained topic
+        # the node then keeps the older record. _messages_reconnect_reset_out
+        # and _handle_connack below hold new publishes behind the stored
+        # ones until they are resent, so the window can be wider than one
+        # without giving up the order (one used to be the guard, and it
+        # capped a publisher at one round trip per message).
+        #
+        # It used to be a lock held across the PUBACK wait instead, which put
+        # EVERY publisher behind the waiter -- including one inside a message
+        # callback, which runs on a thread the network thread joins. The
+        # callback blocked on the lock, the network thread on the callback,
+        # and the waiter's PUBACK on the network thread: a deadlock that ended
+        # only at the timeout.
+        self.max_inflight_messages_set(MAX_INFLIGHT)
+        # True from a reconnect's reset until its CONNACK resent the stored messages.
+        self._resend_hold = False
         # Guards the two dicts below and nothing else -- never held across a
         # wait, never held around a call into paho (whose PUBACK handler runs
         # under paho's own mutex and calls back into `_do_on_publish`).
@@ -207,6 +223,41 @@ class Client(PahoClient):
             with self._inflight_lock:
                 if self._inflight.get(info.mid) is slot:
                     del self._inflight[info.mid]
+
+    def _messages_reconnect_reset_out(self):
+        """paho's reset of the stored messages before a reconnect, kept in
+        order: the oldest ``max_inflight`` unacknowledged messages are resent
+        after CONNACK and the rest stay queued behind them (paho marked all of
+        them for resending at once, past the window), and until that resend
+        the window counts as full, so a publish made meanwhile queues after
+        them instead of going out first. :meth:`_handle_connack` releases it."""
+        super()._messages_reconnect_reset_out()
+        window = self._max_inflight_messages
+        if window <= 0:
+            return
+        with self._out_message_mutex:
+            resending = 0
+            for message in self._out_messages.values():
+                if message.qos == 0 or message.state != mqtt_ms_publish:
+                    continue
+                if resending < window:
+                    resending += 1
+                else:
+                    message.state = mqtt_ms_queued
+            self._inflight_messages = window
+            self._resend_hold = True
+
+    def _handle_connack(self):
+        try:
+            return super()._handle_connack()
+        finally:
+            with self._out_message_mutex:
+                if self._resend_hold and self.is_connected():
+                    # paho counted each message it resent on top of the full
+                    # window it found; what remains is what is on the wire.
+                    self._resend_hold = False
+                    self._inflight_messages = max(0, self._inflight_messages - self._max_inflight_messages)
+                    self._update_inflight()
 
     def _cannot_read_the_puback(self) -> bool:
         return (
