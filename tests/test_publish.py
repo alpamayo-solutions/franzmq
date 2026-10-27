@@ -105,31 +105,24 @@ def test_fire_and_forget_skips_the_wait():
     assert info.mid == 1
 
 
-def test_qos1_publishes_go_out_one_at_a_time_and_in_order():
-    """A second QoS-1 publish must not reach the wire before the first is acked.
-
-    Unbounded in-flight QoS-1 is what lets a reconnect replay an unacked
-    message after a newer one already went out. paho's in-flight window is
-    where that is enforced, so this pins it at paho's seam: the second
-    message sits queued inside paho, not on the wire, until the first is
-    acked -- and no publisher was blocked to achieve that.
-    """
+def test_qos1_publishes_beyond_the_window_queue_in_order_and_publishers_do_not_wait():
+    """No more than the in-flight window reaches the wire before PUBACKs come
+    back; the rest sits queued inside paho, in publish order, and no
+    publisher was blocked to achieve that."""
     client = Client()
-    # paho queues everything while it has no socket; give it one so the first
-    # message can take the in-flight slot. Nothing is written until a loop runs.
+    window = client._max_inflight_messages
     ours, theirs = socket.socketpair()
     client._sock = ours
     try:
-        first = client.publish(_topic("one"), DummyPayload(), qos=1, wait=False)
-        second = client.publish(_topic("two"), DummyPayload(), qos=1, wait=False)
-        states = {mid: client._out_messages[mid].state for mid in (first.mid, second.mid)}
+        infos = [client.publish(_topic(f"t{i}"), DummyPayload(), qos=1, wait=False) for i in range(window + 2)]
+        states = [client._out_messages[info.mid].state for info in infos]
     finally:
         client._sock = None
         ours.close()
         theirs.close()
 
-    assert states[first.mid] == paho_client.mqtt_ms_wait_for_puback, states
-    assert states[second.mid] == paho_client.mqtt_ms_queued, "second publish went out before the first was acked"
+    assert states[:window] == [paho_client.mqtt_ms_wait_for_puback] * window, states
+    assert states[window:] == [paho_client.mqtt_ms_queued] * 2
 
 
 def test_a_publish_from_a_message_callback_does_not_wait_behind_a_waiting_publisher():
@@ -292,3 +285,84 @@ def test_publishing_from_the_network_thread_does_not_wait():
 
     assert not thread.is_alive(), "publish from the network thread blocked"
     assert result["elapsed"] < 1
+
+
+# -- order across a reconnect -------------------------------------------------
+
+
+def _connected(client: Client):
+    """Give paho a socket so publishes take the in-flight window; nothing is
+    written until a loop runs. Returns what to close."""
+    ours, theirs = socket.socketpair()
+    client._sock = ours
+    client._state = paho_client._ConnectionState.MQTT_CS_CONNECTED
+    return ours, theirs
+
+
+def _connack(client: Client) -> None:
+    """Hand paho a successful MQTT 5 CONNACK, as its packet reader would."""
+    client._in_packet = {"remaining_length": 3, "packet": bytes([0, 0, 0])}
+    client._handle_connack()
+
+
+def _sent_after_reconnect(client: Client, on_connect=None) -> list[tuple[str, bytes]]:
+    sent: list[tuple[str, bytes]] = []
+    real = client._send_publish
+
+    def recording(mid, topic, payload, *args, **kwargs):
+        sent.append((topic.decode(), payload))
+        return real(mid, topic, payload, *args, **kwargs)
+
+    client._send_publish = recording
+    client.on_connect = on_connect
+    client._messages_reconnect_reset()  # what paho's reconnect() does first
+    return sent
+
+
+def test_a_publish_made_during_a_reconnect_goes_out_after_every_older_unacknowledged_one():
+    """paho resends the stored messages only after on_connect ran; a publish
+    made there (or by another thread meanwhile) found the window empty and
+    went out first: on a retained topic the node then kept the older record."""
+    client = Client()
+    ours, theirs = _connected(client)
+    try:
+        for value in range(3):
+            client.publish(_topic("state"), DummyPayload(value=value), qos=1, wait=False)
+
+        sent = _sent_after_reconnect(
+            client, lambda *a: client.publish(_topic("state"), DummyPayload(value=3), qos=1, wait=False)
+        )
+        _connack(client)
+    finally:
+        client._sock = None
+        ours.close()
+        theirs.close()
+
+    # Resent first, the new one last: the wire order is the publish order.
+    assert sent == [(str(_topic("state")), DummyPayload(value=v).encode().encode()) for v in range(4)]
+    assert client._inflight_messages == 4
+
+
+def test_a_reconnect_resends_one_window_and_queues_the_rest_in_order():
+    client = Client()
+    client.max_inflight_messages_set(2)
+    ours, theirs = _connected(client)
+    try:
+        mids = [client.publish(_topic(f"t{i}"), DummyPayload(value=i), qos=1, wait=False).mid for i in range(5)]
+        sent = _sent_after_reconnect(client)
+        _connack(client)
+        assert [topic for topic, _ in sent] == [str(_topic("t0")), str(_topic("t1"))], "one window at once"
+        assert client._inflight_messages == 2
+        # Each PUBACK sends the oldest one still queued.
+        for mid in mids[:3]:
+            with client._out_message_mutex:
+                client._do_on_publish(mid, _reason(0), None)
+    finally:
+        client._sock = None
+        ours.close()
+        theirs.close()
+    assert [topic for topic, _ in sent] == [str(_topic(f"t{i}")) for i in range(5)]
+
+
+def test_the_window_is_wider_than_one():
+    assert Client()._max_inflight_messages > 1

@@ -2,7 +2,24 @@
 
 All notable changes to franzmq are documented in this file.
 
-## [Unreleased]
+## [0.7.0] - 2026-10-27
+
+### Fixed
+
+- **A reconnect no longer lets a new publish overtake older unacknowledged
+  ones.** paho resends the stored QoS 1 messages only after CONNACK, after
+  `on_connect` ran; a publish made meanwhile (by `on_connect` or another
+  thread) went out first, so a node kept an older record on a retained topic
+  and stream readers saw writes out of order. This happened with the one-message
+  window too (650-830 of 3,000 writes overtaken in 4 of 5 runs against a real
+  colcad). New publishes now queue behind the stored ones until they are
+  resent, and a reconnect resends one window, not every stored message at once.
+
+### Changed
+
+- **64 QoS 1 publishes in flight instead of one** (`MAX_INFLIGHT`), now that the
+  window keeps its order across a reconnect. A publisher that does not wait
+  for each PUBACK reaches about 1.6-1.8x the rate against colcad.
 
 ### Removed
 
